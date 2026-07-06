@@ -2,6 +2,8 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import SingleThreadedExecutor
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 
 from apple_care_msgs.srv import SrvAppleStatus
 from obj_detection.realsense import ImgNode
@@ -11,6 +13,9 @@ from obj_detection.yolo import AppleStatusModel, MIN_KNOWN_CONFIDENCE
 BACKGROUND_DISTANCE_MM = 700
 PRESENCE_MARGIN_MM = 50
 MIN_PRESENCE_PIXELS = 500
+
+# 디버그용 인식 결과 시각화 이미지 퍼블리시 주기(초)
+DEBUG_IMAGE_PERIOD_SEC = 0.1
 
 
 class ObjectDetectionNode(Node):
@@ -31,7 +36,22 @@ class ObjectDetectionNode(Node):
             'get_apple_status',
             self.handle_get_status,
         )
+
+        self.bridge = CvBridge()
+        self.debug_image_pub = self.create_publisher(Image, 'obj_detection/debug_image', 10)
+        self.create_timer(DEBUG_IMAGE_PERIOD_SEC, self._publish_debug_image)
+
         self.get_logger().info("ObjectDetectionNode initialized.")
+
+    def _publish_debug_image(self):
+        """최신 컬러 프레임에 YOLO 인식 결과를 그려서 디버그 토픽으로 퍼블리시."""
+        self.img_executor.spin_once(timeout_sec=0.0)
+        frame = self.img_node.get_color_frame()
+        if frame is None:
+            return
+        annotated = self.model.annotate_frame(frame)
+        msg = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
+        self.debug_image_pub.publish(msg)
 
     def handle_get_status(self, request, response):
         """카메라에 보이는 사과 상태를 판정해서 반환한다."""

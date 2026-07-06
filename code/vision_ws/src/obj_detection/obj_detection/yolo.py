@@ -68,3 +68,8 @@ class AppleStatusModel:
         if best is None:
             return None, None, None
         return best
+
+    def annotate_frame(self, frame):
+        """단일 프레임에 YOLO 박스/라벨을 그려서 반환 (디버그 시각화용)."""
+        results = self.model(frame, verbose=False)
+        return results[0].plot()
