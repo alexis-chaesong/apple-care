@@ -27,7 +27,7 @@ import json
 import logging
 from typing import Optional
 
-from openai import AsyncOpenAI, APITimeoutError, APIError
+from openai import AsyncOpenAI, APITimeoutError, APIError, AuthenticationError
 
 from config import settings
 
@@ -54,6 +54,12 @@ class LLMParseError(Exception):
     pass
 
 
+class LLMAuthError(Exception):
+    """OPENAI_API_KEY가 비어있거나 잘못되어 OpenAI가 인증을 거부했을 때 발생.
+    재시도해도 해결되지 않으므로 호출부는 즉시 ask_human/STUCK 등으로 안전하게 처리해야 함"""
+    pass
+
+
 async def _call_json(system_prompt: str, user_prompt: str) -> dict:
     """
     공통 호출 헬퍼. JSON 모드로 OpenAI를 호출하고 파싱까지 마친 dict를 반환.
@@ -74,6 +80,13 @@ async def _call_json(system_prompt: str, user_prompt: str) -> dict:
             )
             raw = response.choices[0].message.content
             return json.loads(raw)
+
+        except AuthenticationError as exc:
+            # AuthenticationError는 APIError의 하위 클래스이므로 아래 일반 APIError
+            # 핸들러보다 반드시 먼저 잡아야 함. 재시도해도 해결되지 않는 문제이므로
+            # 루프를 돌지 않고 즉시 LLMAuthError로 변환해 위로 전파함
+            logger.critical("OpenAI 인증 실패 - OPENAI_API_KEY를 확인하세요.")
+            raise LLMAuthError(str(exc)) from exc
 
         except APITimeoutError as exc:
             logger.error("OpenAI 호출 타임아웃 (%.1fs)", settings.openai_timeout_sec)
@@ -104,9 +117,11 @@ async def translate_policy_command(raw_text: str) -> list[dict]:
         "너는 농산물 분류 로봇의 정책 번역기다. "
         "작업자의 한국어 명령을 아래 JSON 스키마의 배열로만 변환해라. "
         '스키마: {"policies": [{"fruit_type": string, "condition": string, '
-        '"destination": "normal_box"|"processing_box"|"discard_box"|"ask_human"}]} '
+        '"destination": "normal_box"|"processing_box"|"discard_box"|"ugly_box"|"ask_human"}]} '
+        "ugly_box=등급외/못난이 상품(외관은 떨어지지만 폐기·가공 대상은 아닌 경우). "
         "fruit_type은 명시 안 되면 'apple'로 간주한다. "
-        "condition은 'small', 'scratch', 'mold', 'unknown' 중 문맥에 맞는 값을 골라라. "
+        "condition은 'small', 'bruise', 'scratch', 'mold', 'unknown' 중 문맥에 맞는 값을 골라라. "
+        "'멍'은 반드시 'bruise'로, '흠집'/'스크래치'는 반드시 'scratch'로 구분해라 (동의어로 취급하지 마라). "
         "설명이나 다른 텍스트 없이 이 JSON 객체만 출력해라."
     )
     result = await _call_json(system_prompt, raw_text)
@@ -150,18 +165,20 @@ async def interpret_human_answer(raw_answer: str) -> dict:
     예) "가공용으로 보내" -> {"destination": "processing_box"}
         "그냥 버려"       -> {"destination": "discard_box"}
         "그건 정상 판매"   -> {"destination": "normal_box"}
+        "못난이로 보내"    -> {"destination": "ugly_box"}
 
-    애매하거나 destination 3가지 중 어디에도 안 맞으면 destination을 null로 반환하게 하고,
+    애매하거나 destination 4가지 중 어디에도 안 맞으면 destination을 null로 반환하게 하고,
     호출부(hitl_router.py)가 null이면 재질문하도록 처리해야 함
     (여기서 억지로 추측해서 잘못된 destination을 반환하면 안 됨 - 안전 최우선)
     """
     system_prompt = (
         "너는 작업자의 한국어 답변을 분류하는 역할이다. "
-        "답변이 다음 세 가지 중 어디에 해당하는지 판단해서 "
-        '{"destination": "normal_box"|"processing_box"|"discard_box"|null} '
+        "답변이 다음 네 가지 중 어디에 해당하는지 판단해서 "
+        '{"destination": "normal_box"|"processing_box"|"discard_box"|"ugly_box"|null} '
         "형태의 JSON으로만 출력해라. "
-        "normal_box=정상 판매, processing_box=가공용/2차 상품, discard_box=폐기. "
-        "셋 중 무엇인지 확실하지 않으면 반드시 null을 출력해라. 추측하지 마라."
+        "normal_box=정상 판매, processing_box=가공용/2차 상품, discard_box=폐기, "
+        "ugly_box=못난이/등급외 상품(폐기까지는 아니지만 정상 판매도 아닌 경우). "
+        "넷 중 무엇인지 확실하지 않으면 반드시 null을 출력해라. 추측하지 마라."
     )
     result = await _call_json(system_prompt, raw_answer)
     if "destination" not in result:

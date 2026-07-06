@@ -69,8 +69,14 @@ async def listen_once(timeout_sec: float) -> Optional[str]:
     """
     sample_rate = settings.stt_sample_rate
 
+    # 녹음 길이를 timeout_sec 그대로 쓰면, 녹음 종료 시점과 hitl_state_machine.py의
+    # asyncio.wait_for 타임아웃이 거의 동시에 발생해 스케줄링 오차로 결과 전송 전에
+    # Task가 cancel되는 경쟁 상태가 생김. 답변 대기 시간보다 최소 3초 여유를 두어
+    # Whisper API 호출/응답 시간을 확보함 (최소 1초는 보장)
+    recording_duration = min(settings.stt_recording_duration_sec, max(timeout_sec - 3.0, 1.0))
+
     try:
-        recording = await asyncio.to_thread(_record_blocking, timeout_sec, sample_rate)
+        recording = await asyncio.to_thread(_record_blocking, recording_duration, sample_rate)
     except Exception:  # noqa: BLE001
         logger.error("마이크 녹음 실패 (장치 확인 필요)", exc_info=True)
         return None

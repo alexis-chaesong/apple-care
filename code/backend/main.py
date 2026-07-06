@@ -22,7 +22,7 @@ from config import settings
 from database import init_db
 from models import VisionFeatureIn
 from robot_bridge import bridge_manager
-from connection_manager import ConnectionManager
+from connection_manager import connection_manager
 from services.decision_planner import decide
 from state.hitl_state_machine import hitl_state_machine
 from routers import robot_router, vla_router, hitl_router
@@ -37,8 +37,9 @@ logger = logging.getLogger(__name__)
 # 중심이 되는 두 객체. main.py 모듈 레벨에 두어 lifespan/엔드포인트에서 공유
 broadcast_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
 # ROS 2가 던져준 데이터를 임시로 담아두는 비동기 큐. 최대 크기(maxsize=1000)를 지정해 메모리 폭주를 막음
-connection_manager = ConnectionManager()
-# 앞서 분석한 웹소켓 관리자 인스턴스
+# connection_manager 싱글톤은 connection_manager.py 자체에서 생성됨(bridge_manager와 동일 패턴).
+# main.py는 그걸 import해서 쓸 뿐 - 이렇게 해야 hitl_state_machine.py 같은 백그라운드
+# asyncio task도 main.py를 거치지 않고(순환참조 없이) 직접 import해서 broadcast를 호출할 수 있음
 
 _consumer_task: asyncio.Task | None = None
 # 백그라운드에서 평생 돌며 큐를 감시할 타스크 객체를 저장할 변수

@@ -25,6 +25,13 @@ import os
 from dataclasses import dataclass, field
 # 파이썬에서 데이터를 저장하는 목적의 클래스를 보일러플레이트(반복되는 코드) 없이 깔끔하게 만들 수 있도록 도와주는 내장 라이브러리
 
+from dotenv import load_dotenv
+load_dotenv()
+# .env 파일의 키=값을 os.environ에 미리 채워 넣음. 아래 Settings 클래스의 각 필드가
+# os.getenv(...)로 값을 읽기 전에 반드시 실행되어야 하므로 import 직후, 클래스 정의보다 위에 둠
+# (find_dotenv()가 현재 작업 디렉토리부터 상위로 올라가며 .env를 찾으므로,
+#  .env가 backend/ 바로 아래가 아니라 상위 디렉토리에 있어도 정상적으로 로드됨)
+
 # 클래스 데코레이터 설정
 @dataclass(frozen=True)
 # 자동으로 __init__ 메소드 등을 만들어주어 객체 생성을 편하게함
@@ -167,6 +174,15 @@ class Settings:
     )
 
     stt_sample_rate: int = field(default_factory=lambda: int(os.getenv("STT_SAMPLE_RATE", "16000")))
+    stt_recording_duration_sec: float = field(
+        default_factory=lambda: float(os.getenv("STT_RECORDING_DURATION_SEC", "8.0"))
+    )
+    # stt_recording_duration_sec: 마이크 녹음 자체의 길이(초).
+    # hitl_response_timeout_sec(답변 전체 대기 시간)과 값이 같으면, 녹음 종료 시점과
+    # hitl_state_machine.py의 asyncio.wait_for 타임아웃이 거의 동시에 발생해
+    # 스케줄링 오차로 STT 결과가 도착하기 전에 Task가 cancel되는 경쟁 상태가 생김.
+    # 이를 피하려고 녹음 시간을 답변 대기 시간보다 충분히 짧게 분리해서 관리함
+    # (listen_once()가 실제 녹음 길이를 정할 때 이 값과 timeout_sec을 함께 고려함)
     tts_voice: str = field(default_factory=lambda: os.getenv("TTS_VOICE", "alloy"))
     tts_audio_player: str = field(default_factory=lambda: os.getenv("TTS_AUDIO_PLAYER", "afplay"))
     # 로컬(Mac) 개발 중엔 기본값 "afplay" 그대로 두고,
@@ -176,6 +192,12 @@ class Settings:
 # 다른 파일에서는 `from config import settings` 로만 가져다 사용
 # settings = Settings(): 클래스를 정의하는 것에 그치지 않고, 실제로 사용할 단 하나의 설정 객체(Instance)를 미리 찍어냄 
 settings = Settings()
+
+if not settings.openai_api_key:
+    import logging
+    logging.getLogger(__name__).critical(
+        "OPENAI_API_KEY가 비어 있습니다. backend/.env 파일을 확인하세요."
+    )
 
 # 이 코드 덕분에, 도커(docker-compose.yml)에서 환경 변수를 어떻게 바꾸든 백엔드 내부 코드는 단 한 줄도 수정할 필요가 없어짐. 
 # 파이프라인의 중심을 잡아주는 든든한 뼈대임
