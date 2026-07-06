@@ -26,13 +26,15 @@ class AppleStatusModel:
     def __init__(self):
         self.model = YOLO(YOLO_MODEL_PATH)
 
-    def get_frames(self, img_node, img_executor, duration=1.0):
-        """duration(초) 동안 컬러 프레임을 모아서 리스트로 반환."""
+    def get_frames(self, img_node, duration=1.0):
+        """duration(초) 동안 컬러 프레임을 모아서 리스트로 반환.
+
+        img_node는 이제 자체 백그라운드 스레드에서 계속 spin되고 있으므로,
+        여기서는 그냥 최신 프레임을 주기적으로 읽어오기만 하면 된다."""
         end_time = time.time() + duration
         frames = {}
 
         while time.time() < end_time:
-            img_executor.spin_once(timeout_sec=0.1)
             frame = img_node.get_color_frame()
             stamp = img_node.get_color_frame_stamp()
             if frame is not None:
@@ -41,13 +43,13 @@ class AppleStatusModel:
 
         return list(frames.values())
 
-    def get_best_detection(self, img_node, img_executor):
+    def get_best_detection(self, img_node):
         """카메라에 보이는 것 중 confidence가 가장 높은 박스 하나를 반환.
 
         반환값: (class_name, confidence, box[x1,y1,x2,y2]) 또는 감지된 게 전혀 없으면
         (None, None, None).
         """
-        frames = self.get_frames(img_node, img_executor)
+        frames = self.get_frames(img_node)
         if not frames:
             return None, None, None
 

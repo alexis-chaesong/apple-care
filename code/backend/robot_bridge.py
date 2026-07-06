@@ -22,16 +22,20 @@ connection_manager.py로 이동했으므로 이 파일에서는 제거했음
 이 코드는 "ROS 2의 스레드 환경"에서 들어오는 실시간 데이터를 "FastAPI의 비동기(AsyncIO) 루프"로 
 안전하게 던져주는 스레드 안전(Thread-safe) 브리지 역할을 완벽하게 수행하고 있음
 """
+import base64
 import json
 import logging
 import threading
 import time
 from asyncio import AbstractEventLoop, Queue, QueueFull
 
+import cv2
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from sensor_msgs.msg import Image
 from std_msgs.msg import String, Bool  # 실제 로봇 상태 토픽 메시지 타입에 맞게 조정 가능
+from cv_bridge import CvBridge
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,11 @@ TOPIC_SAFETY_EVENT = "/robot/safety_event"
 TOPIC_RECOVERY_STAGE = "/robot/recovery_stage"
 TOPIC_COMMAND = "/robot/command"
 TOPIC_GRIPPER_STATUS = "/gripper/status"
+# obj_detection 노드가 publish하는 YOLO 인식결과 오버레이 이미지
+TOPIC_DEBUG_IMAGE = "/obj_detection/debug_image"
+
+# JPEG 인코딩 품질 (0~100). 웹소켓으로 계속 흘려보내야 하므로 화질보다 전송 크기를 우선함
+DEBUG_IMAGE_JPEG_QUALITY = 70
 
 SPIN_TIMEOUT_SEC = 0.1
 
@@ -147,6 +156,15 @@ class RobotBridgeManager:
             TOPIC_GRIPPER_STATUS,
             self._gripper_status_callback,
             10,
+        )
+
+        # obj_detection의 디버그 이미지(인식결과 오버레이) 구독 -> HMI 실시간 모니터링용
+        self.cv_bridge = CvBridge()
+        self.debug_image_sub = self.node.create_subscription(
+            Image,
+            TOPIC_DEBUG_IMAGE,
+            self._debug_image_callback,
+            1,  # 이미지는 크므로 큐 깊이를 얕게 둬서 항상 최신 프레임만 유지
         )
 
         #  명령 하달용 Publisher 생성
@@ -335,6 +353,32 @@ class RobotBridgeManager:
             "timestamp": time.time(),
         }
         self._dispatch(payload)
+
+    def _debug_image_callback(self, msg: Image) -> None:
+        """
+        obj_detection의 인식결과 오버레이 이미지를 받아 JPEG로 압축 후
+        base64 문자열로 인코딩해서 HMI로 흘려보냄.
+        raw Image(bgr8)를 그대로 JSON에 실으면 프레임당 수백 KB~1MB라
+        웹소켓/큐가 감당 못하므로 반드시 JPEG로 압축한 뒤 전달함.
+        """
+        try:
+            frame = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            ok, jpeg = cv2.imencode(
+                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, DEBUG_IMAGE_JPEG_QUALITY]
+            )
+            if not ok:
+                logger.warning("디버그 이미지 JPEG 인코딩 실패")
+                return
+            b64_image = base64.b64encode(jpeg.tobytes()).decode('ascii')
+        except Exception:  # noqa: BLE001
+            logger.error("디버그 이미지 처리 중 예외 발생", exc_info=True)
+            return
+
+        self._dispatch({
+            "type": "CAMERA_FRAME",
+            "image": b64_image,
+            "timestamp": time.time(),
+        })
 
     # [백업 대비 추가] ROS 문자열 체크포인트를 백엔드 공통 이벤트 형식으로 변환
     # ROS 콜백에서 웹소켓을 직접 호출하지 않고 _dispatch를 사용하므로,
