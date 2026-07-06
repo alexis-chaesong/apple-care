@@ -8,7 +8,12 @@ from rclpy.node import Node
 from ament_index_python.packages import get_package_share_directory
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import PromptTemplate  # d2 이거를 langchain_core로 바꿈
+try:
+    # langchain-core 1.x (Jazzy 쪽에서 설치되는 최신 langchain-openai가 요구)
+    from langchain_core.prompts import PromptTemplate
+except ModuleNotFoundError:
+    # 구버전 langchain (langchain-core 분리 이전, Humble 쪽 환경)
+    from langchain.prompts import PromptTemplate
 # from langchain.chains import LLMChain
 
 from std_srvs.srv import Trigger
