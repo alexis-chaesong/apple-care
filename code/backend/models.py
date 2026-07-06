@@ -127,8 +127,9 @@ class PolicyUpdateRequest(BaseModel):
     condition: str
     # 정책이 걸리는 조건 키. 예: "small", "scratch", "mold", "unknown"
 
-    destination: Literal["normal_box", "processing_box", "discard_box", "ask_human"]
-    # 조건에 대응하는 목적지. 임의 문자열이 아니라 4가지로 강제해서 오타로 인한 사고를 방지
+    destination: Literal["normal_box", "processing_box", "discard_box", "ugly_box", "ask_human"]
+    # 조건에 대응하는 목적지. 임의 문자열이 아니라 5가지로 강제해서 오타로 인한 사고를 방지
+    # ugly_box: 등급외/못난이 상품 전용 목적지 (HMI 프론트 4분류 "판매/못난이/가공용/폐기" 대응)
 
     source: Literal["llm_policy", "human_feedback"] = "llm_policy"
     # 이 정책이 "작업자 자연어 명령"으로 생긴 건지, "Unknown Object에 대한 개별 피드백"으로 생긴 건지 구분
@@ -142,7 +143,7 @@ class HumanFeedbackRequest(BaseModel):
     fruit_type: str
     # 질문 대상이었던 과일 종류. 예: "kiwi"
 
-    destination: Literal["normal_box", "processing_box", "discard_box"]
+    destination: Literal["normal_box", "processing_box", "discard_box", "ugly_box"]
     # 사람이 지정한 목적지. ask_human은 여기 올 수 없음 (사람이 이미 답했으므로)
 
     raw_answer: str

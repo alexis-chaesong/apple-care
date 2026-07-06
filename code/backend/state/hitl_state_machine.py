@@ -36,6 +36,7 @@ STT/TTS 모듈에 기대하는 인터페이스 (다음 단계에서 구현 예�
 
 import asyncio
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass, field as dc_field
 from enum import Enum
@@ -43,8 +44,9 @@ from typing import Optional
 
 from config import settings
 from robot_bridge import bridge_manager
+from connection_manager import connection_manager
 from services import llm_service
-from services.llm_service import LLMTimeoutError, LLMParseError
+from services.llm_service import LLMTimeoutError, LLMParseError, LLMAuthError
 from services.bayesian_policy import record_human_feedback
 
 logger = logging.getLogger(__name__)
@@ -135,6 +137,62 @@ class HITLStateMachine:
         return self._current
 
     # ------------------------------------------------------------------
+    # 관리자 강제 개입 (POST /api/robot/reset)
+    # ------------------------------------------------------------------
+    async def force_reset(self, destination: Optional[str] = None) -> dict:
+        """
+        관리자가 STUCK(또는 진행 중인 어떤 세션이든) 상태에서 강제로 벗어나게 함.
+
+        destination이 주어지면: 관리자가 최종 판단을 내린 것으로 간주해서
+        record_human_feedback()으로 정책에 반영 (raw_answer="[관리자 강제 리셋]"으로 기록).
+        destination이 없으면: 정책 변경 없이 그냥 현재 세션만 정리하고 로봇 재개.
+
+        어느 경우든 반드시 RESUME을 발행하고, 대기 중인 다음 HITL 요청이 있으면
+        이어서 시작함.
+        """
+        async with self._lock:
+            if self._current is None:
+                return {"result": "NO_ACTIVE_SESSION"}
+            session = self._current
+
+        result_destination = None
+        if destination is not None:
+            updated = record_human_feedback(
+                fruit_type=session.fruit_type,
+                condition=session.condition,
+                destination=destination,
+                raw_answer="[관리자 강제 리셋]",
+                session_id=session.session_id,
+            )
+            result_destination = updated["destination"]
+
+        bridge_manager.publish_command(
+            command_type="RESUME",
+            payload={"fruit_type": session.fruit_type, "destination": result_destination},
+        )
+        logger.warning(
+            "관리자 강제 리셋 (session_id=%s): destination=%s",
+            session.session_id, result_destination,
+        )
+
+        # 세션이 STUCK이 아니라 아직 ASKING/LISTENING 등으로 실제 실행 중이었을 경우
+        # (관리자가 STUCK을 기다리지 않고 진행 중인 세션을 강제로 끊는 경우),
+        # _run_session() task가 답변 Future를 기다리며 멈춰있을 수 있음.
+        # 그냥 self._current만 비우면 그 task는 최대 hitl_response_timeout_sec초 동안
+        # 좀비처럼 계속 돌면서 새로 시작된 다음 세션과 마이크/스피커를 두고 경합할 수 있으므로,
+        # 대기 중인 Future를 명시적으로 취소해서 즉시 깨어나 스스로 멈추게 함
+        # (_run_session()의 finally에 있는 should_cleanup 체크가 이 task의 중복 정리를 막아줌)
+        if self._answer_future is not None and not self._answer_future.done():
+            self._answer_future.cancel()
+        self._answer_future = None
+
+        async with self._lock:
+            self._current = None
+        await self._start_next_pending()
+
+        return {"result": "RESET_DONE", "session_id": session.session_id, "destination": result_destination}
+
+    # ------------------------------------------------------------------
     # 내부 세션 실행 루프
     # ------------------------------------------------------------------
     async def _run_session(self) -> None:
@@ -168,13 +226,56 @@ class HITLStateMachine:
                 "HITL 세션 STUCK (session_id=%s): fruit=%s condition=%s - 관리자 개입 필요",
                 session.session_id, session.fruit_type, session.condition,
             )
-            # 로봇은 계속 HOLD 상태 유지. 관리자가 /api/robot/reset 등으로 직접 개입해야 함
+            # 로봇은 계속 HOLD 상태 유지. 관리자가 /api/robot/reset으로 직접 개입해야 함
+            # (아래 finally에서 self._current를 정리하지 않고 그대로 남겨둠 - 그래야
+            # force_reset()이 current_session으로 이 세션을 찾아서 복구할 수 있음)
+            await connection_manager.broadcast({
+                "type": "HITL_STUCK",
+                "payload": {
+                    "session_id": session.session_id,
+                    "fruit_type": session.fruit_type,
+                    "condition": session.condition,
+                },
+                "timestamp": time.time(),
+            })
+            return
+
+        except Exception:
+            # 예상 못한 예외(버그, 네트워크 문제 등)로 asyncio Task가 조용히 죽어버리면
+            # session.state가 HOLD/ASKING/LISTENING 등 어중간한 상태로 멈춰서
+            # 로봇이 영원히 Hold된 채 아무 로그도 안 남는 최악의 상황이 됨.
+            # 그런 경우에도 반드시 STUCK으로 안전하게 귀결시킴 (never fail silently)
+            session.state = HITLState.STUCK
+            logger.critical(
+                "HITL 세션 처리 중 예기치 못한 에러로 STUCK 처리 (session_id=%s)",
+                session.session_id, exc_info=True,
+            )
+            await connection_manager.broadcast({
+                "type": "HITL_STUCK",
+                "payload": {
+                    "session_id": session.session_id,
+                    "fruit_type": session.fruit_type,
+                    "condition": session.condition,
+                },
+                "timestamp": time.time(),
+            })
+            return
 
         finally:
-            self._answer_future = None
-            async with self._lock:
-                self._current = None
-            await self._start_next_pending()
+            # should_cleanup이 필요한 이유(force_reset()과의 경합 방지):
+            #   - session.state == STUCK: 위에서 의도적으로 정리를 건너뛴 경우이므로
+            #     여기서도 건너뛰어야 함 (STUCK 세션은 force_reset()이 정리할 때까지 보존)
+            #   - self._current is not session: force_reset()이 이미 이 세션을 강제로
+            #     정리(self._current=None, _start_next_pending() 호출)한 뒤이므로,
+            #     뒤늦게 깨어난 이 task가 또 정리하거나 다음 세션을 중복 시작하면 안 됨
+            #     (예: LISTENING 중 force_reset()이 답변 Future를 cancel()해서 이
+            #     task가 CancelledError로 깨어나는 경우가 여기 해당)
+            should_cleanup = (self._current is session) and (session.state != HITLState.STUCK)
+            if should_cleanup:
+                self._answer_future = None
+                async with self._lock:
+                    self._current = None
+                await self._start_next_pending()
 
     async def _ask_and_wait(self, session: HITLSession) -> bool:
         """
@@ -186,7 +287,7 @@ class HITLStateMachine:
         try:
             fruit_guess = session.fruit_type if session.fruit_type != "unknown" else None
             question = await llm_service.generate_unknown_question(fruit_guess)
-        except (LLMTimeoutError, LLMParseError):
+        except (LLMTimeoutError, LLMParseError, LLMAuthError):
             # 질문 생성 자체가 실패하면 정형화된 fallback 문장 사용
             # (여기서마저 실패하면 로봇이 영원히 조용히 멈춰있게 되므로 반드시 fallback 필요)
             logger.warning("질문 생성 실패, fallback 문장 사용 (session_id=%s)", session.session_id)
@@ -214,7 +315,7 @@ class HITLStateMachine:
         session.state = HITLState.INTERPRETING
         try:
             interpreted = await llm_service.interpret_human_answer(raw_answer)
-        except (LLMTimeoutError, LLMParseError):
+        except (LLMTimeoutError, LLMParseError, LLMAuthError):
             logger.warning("답변 해석 실패 (session_id=%s): %s", session.session_id, raw_answer)
             return False
 
@@ -239,6 +340,17 @@ class HITLStateMachine:
             "HITL 세션 완료 (session_id=%s): destination=%s confidence=%.2f",
             session.session_id, destination, updated_policy["confidence"],
         )
+        await connection_manager.broadcast({
+            "type": "HITL_RESOLVED",
+            "payload": {
+                "session_id": session.session_id,
+                "fruit_type": session.fruit_type,
+                "condition": session.condition,
+                "destination": destination,
+                "confidence": updated_policy["confidence"],
+            },
+            "timestamp": time.time(),
+        })
         return True
 
     async def _listen_via_stt(self) -> None:

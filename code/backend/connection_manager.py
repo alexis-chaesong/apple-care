@@ -40,3 +40,11 @@ class ConnectionManager:
         for ws in dead:
             if ws in self._connections:
                 self._connections.remove(ws)
+
+
+# 전역 싱글톤 인스턴스. robot_bridge.py의 bridge_manager와 동일한 패턴 -
+# main.py가 자체적으로 인스턴스를 만들지 않고 여기서 만든 걸 import해서 씀.
+# 이렇게 해야 HTTP 요청 핸들러가 아닌 백그라운드 asyncio task(예: hitl_state_machine.py)도
+# main.py를 거치지 않고(순환참조 없이) `from connection_manager import connection_manager`로
+# 바로 접근할 수 있음.
+connection_manager = ConnectionManager()

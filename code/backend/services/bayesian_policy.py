@@ -87,6 +87,33 @@ def get_policy(fruit_type: str, condition: str) -> Optional[PolicyRecord]:
         conn.close()
 
 
+def upsert_llm_policy(fruit_type: str, condition: str, destination: str) -> PolicyRecord:
+    """작업자가 자연어로 직접 지정한 명시적 규칙을 저장. confidence=1.0으로
+    즉시 최고 신뢰도 부여해서 다음 판정부터 바로 자동 적용되게 함."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO tb_policy_memory
+                (fruit_type, condition, destination, alpha, beta, confidence, source, updated_at)
+            VALUES (?, ?, ?, 1.0, 1.0, 1.0, 'llm_policy', datetime('now', 'localtime'))
+            ON CONFLICT(fruit_type, condition) DO UPDATE SET
+                destination = excluded.destination,
+                confidence = 1.0,
+                source = 'llm_policy',
+                updated_at = datetime('now', 'localtime')
+            """,
+            (fruit_type, condition, destination),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    updated = get_policy(fruit_type, condition)
+    assert updated is not None
+    return updated
+
+
 def should_ask_human(fruit_type: str, condition: str) -> bool:
     """
     이 조합에 대해 사람에게 물어봐야 하는지 여부.
