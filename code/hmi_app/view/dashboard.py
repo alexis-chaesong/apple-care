@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
+import base64
 import json
 import os
 import queue
@@ -7,6 +8,7 @@ import sys
 import threading
 from datetime import datetime
 import cv2  # OpenCV 추가
+import numpy as np
 from PIL import Image, ImageTk  # Pillow 추가
 import requests
 
@@ -70,9 +72,10 @@ class VLASorterDashboard:
         self.ws_client.start()
         self.root.after(100, self.poll_ws_queue)
 
-        # [추가] OpenCV 웹캠 초기화 (0은 기본 내장 캠)
-        self.cap = cv2.VideoCapture(0)
-        
+        # obj_detection 노드가 publish하는 인식결과 오버레이 이미지를 backend
+        # 웹소켓(CAMERA_FRAME)으로 받아서 그리는 방식으로 변경 (로컬 웹캠 대신 실제
+        # D455+YOLO 파이프라인 화면을 보여줌). 로컬 cv2.VideoCapture는 더 이상 사용 안 함.
+
         # 메인 컨테이너 레이아웃 구성
         self.create_top_bar()
         self.create_side_bar()
@@ -174,6 +177,18 @@ class VLASorterDashboard:
                 "로봇/시스템 제어 탭에서 강제 복구가 필요합니다.",
             )
 
+        elif msg_type == "CAMERA_FRAME":
+            # robot_bridge.py가 obj_detection/debug_image를 JPEG+base64로 인코딩해서 보낸 것.
+            # 디코딩해서 바로 렌더링 (로컬 웹캠 대신 실제 D455+YOLO 인식결과 화면)
+            try:
+                jpg_bytes = base64.b64decode(msg.get("image", ""))
+                jpg_array = np.frombuffer(jpg_bytes, dtype=np.uint8)
+                frame = cv2.imdecode(jpg_array, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    self.render_camera_frame(frame)
+            except Exception as e:  # noqa: BLE001
+                self.log_message(f"[CAMERA_FRAME] 디코딩 실패: {e}")
+
     # 1. 상단 글로벌 제어 및 상태 바 (상시 노출)
     def create_top_bar(self):
         top_bar = tk.Frame(self.root, bg="#1a252f", height=60)
@@ -244,8 +259,8 @@ class VLASorterDashboard:
         cam_frame = tk.Frame(parent, bg="#2c3e50")
         cam_frame.pack(fill="both", expand=True, pady=(0, 10))
         
-        # [수정] Cam 1: Intel RealSense D455 대용 -> 노트북 웹캠 출력용 Label로 변경
-        self.frame_d455 = tk.LabelFrame(cam_frame, text="Cam 1: Laptop Webcam (Real-time View)", font=("Helvetica", 11, "bold"), fg="#ecf0f1", bg="#34495e", bd=2)
+        # [수정] obj_detection의 YOLO 인식결과 오버레이를 backend 웹소켓(CAMERA_FRAME)으로 받아 표시
+        self.frame_d455 = tk.LabelFrame(cam_frame, text="Cam 1: D455 + YOLO Detection (Real-time View)", font=("Helvetica", 11, "bold"), fg="#ecf0f1", bg="#34495e", bd=2)
         self.frame_d455.pack(side="left", fill="both", expand=True, padx=(0, 5))
 
         # [수정] 웹캠 영상 컨테이너: 창 크기에 맞춰 '채우도록'(fill+expand) 배치하되,
@@ -272,11 +287,6 @@ class VLASorterDashboard:
         lbl_c720.pack(fill="both", expand=True, padx=5, pady=5)
 
         self.create_counter_table(parent)
-        
-        # [수정] 창이 완전히 그려져서 위젯 크기가 확정된 뒤에 스트리밍 루프 시작
-        # (레이아웃이 안 잡힌 상태에서 바로 시작하면 winfo_width가 엉뚱한 값을 줘서 화면이 찌그러짐)
-        self.root.update_idletasks()
-        self.root.after(100, self.update_webcam)
 
     # [추가] 컨테이너 크기가 "진짜" 바뀔 때만 호출됨 (창 리사이즈, 레이아웃 변경 시)
     # 이미지 갱신 때문에 호출되는 게 아니라, pack_propagate(False)로 막아뒀기 때문에
@@ -285,49 +295,42 @@ class VLASorterDashboard:
         self.cam_box_w = max(event.width, 10)
         self.cam_box_h = max(event.height, 10)
 
-    # [수정] 실시간 웹캠 프레임 업데이트 함수 - 비율 유지(letterbox) 방식으로 변경
-    def update_webcam(self):
-        if hasattr(self, 'lbl_webcam') and self.cap.isOpened():
-            ret, frame = self.cap.read()
-            if ret:
-                # 1. 좌우 반전 (거울 모드)
-                frame = cv2.flip(frame, 1)
+    # [수정] 로컬 웹캠 폴링 대신, backend가 CAMERA_FRAME 웹소켓 메시지로 보내주는
+    # obj_detection의 인식결과 오버레이 프레임을 받을 때마다 그림 (실제 D455+YOLO 화면).
+    # 비율 유지(letterbox) 방식으로 채워 넣는 로직은 그대로 재사용.
+    def render_camera_frame(self, frame):
+        if not hasattr(self, 'lbl_webcam'):
+            return
 
-                # 2. 담을 칸의 크기 - Configure 이벤트로 갱신된 값 사용 (창 크기에 맞춰 채우되, 이미지가 이 값을 다시 바꾸진 못함)
-                box_w = self.cam_box_w
-                box_h = self.cam_box_h
+        box_w = self.cam_box_w
+        box_h = self.cam_box_h
 
-                frame_h, frame_w = frame.shape[:2]
+        frame_h, frame_w = frame.shape[:2]
 
-                # 3. 원본 비율을 유지하면서 칸 안에 '꽉 차게, 잘리지 않게' 들어갈 배율 계산
-                #    (가로에 맞추면 세로가 남고, 세로에 맞추면 가로가 남을 수 있음 -> 더 작은 쪽 배율 선택)
-                scale = min(box_w / frame_w, box_h / frame_h)
-                new_w, new_h = int(frame_w * scale), int(frame_h * scale)
-                resized = cv2.resize(frame, (new_w, new_h))
+        # 원본 비율을 유지하면서 칸 안에 '꽉 차게, 잘리지 않게' 들어갈 배율 계산
+        # (가로에 맞추면 세로가 남고, 세로에 맞추면 가로가 남을 수 있음 -> 더 작은 쪽 배율 선택)
+        scale = min(box_w / frame_w, box_h / frame_h)
+        new_w, new_h = int(frame_w * scale), int(frame_h * scale)
+        resized = cv2.resize(frame, (new_w, new_h))
 
-                # 4. 칸 크기의 검은 캔버스를 만들고 가운데에 영상 붙이기 (레터박싱)
-                #    -> 세로로 긴 액자에 정사각 사진을 억지로 늘리는 대신,
-                #       액자 크기에 맞는 검은 매트를 깔고 사진은 원래 비율 그대로 가운데 배치
-                canvas = cv2.copyMakeBorder(
-                    resized,
-                    top=(box_h - new_h) // 2,
-                    bottom=box_h - new_h - (box_h - new_h) // 2,
-                    left=(box_w - new_w) // 2,
-                    right=box_w - new_w - (box_w - new_w) // 2,
-                    borderType=cv2.BORDER_CONSTANT,
-                    value=(0, 0, 0)
-                )
+        # 칸 크기의 검은 캔버스를 만들고 가운데에 영상 붙이기 (레터박싱)
+        canvas = cv2.copyMakeBorder(
+            resized,
+            top=(box_h - new_h) // 2,
+            bottom=box_h - new_h - (box_h - new_h) // 2,
+            left=(box_w - new_w) // 2,
+            right=box_w - new_w - (box_w - new_w) // 2,
+            borderType=cv2.BORDER_CONSTANT,
+            value=(0, 0, 0)
+        )
 
-                # 5. OpenCV(BGR) -> Tkinter(RGB) 변환 후 표시
-                cv2image = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(cv2image)
-                imgtk = ImageTk.PhotoImage(image=img)
+        # OpenCV(BGR) -> Tkinter(RGB) 변환 후 표시
+        cv2image = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(cv2image)
+        imgtk = ImageTk.PhotoImage(image=img)
 
-                self.lbl_webcam.imgtk = imgtk  # 가비지 컬렉션 방지 참조 유지
-                self.lbl_webcam.config(image=imgtk)
-
-        # 15ms(약 60fps) 마다 자기 자신을 재호출
-        self.root.after(15, self.update_webcam)
+        self.lbl_webcam.imgtk = imgtk  # 가비지 컬렉션 방지 참조 유지
+        self.lbl_webcam.config(image=imgtk)
 
     def setup_policy_tab(self, parent):
         frame = tk.LabelFrame(parent, text="■ VLA NATURAL LANGUAGE POLICY INPUT", font=("Helvetica", 12, "bold"), fg="#ecf0f1", bg="#34495e", bd=2)
@@ -536,11 +539,9 @@ class VLASorterDashboard:
                             font=("Helvetica", 10, "bold"), width=9, command=lambda c=cat: manual_sort(c))
             btn.pack(side="left", padx=5, expand=True)
 
-    # [추가] 윈도우 창 닫을 때 카메라 프로세스 릴리즈용 함수
+    # [추가] 윈도우 창 닫을 때 웹소켓 연결 정리용 함수
     def on_closing(self):
         self.ws_client.stop()
-        if self.cap.isOpened():
-            self.cap.release()
         self.root.destroy()
 
 if __name__ == "__main__":
