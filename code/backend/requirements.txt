@@ -1,0 +1,34 @@
+# FastAPI를 기반으로 비동기 웹 서버와 데이터베이스 연동, 그리고 실시간 웹소켓 통신을 구축하기 위한 최정예 백엔드 패키지 조합
+# 이 프로젝트 폴더 구조(main.py, database.py, models.py 등)가 안정적으로 돌아갈 수 있도록 뒤에서 받쳐주는 파이썬 의존성 명세서
+
+fastapi>=0.110.0
+# 백엔드 서버의 메인 프레임워크
+# main.py에서 @app.post("/api/dump/start")나 @app.websocket("/ws/robot/status") 같은 HTTP API 엔드포인트와 웹소켓 라우팅을 선언하고, 서버의 전체 생명주기(lifespan)를 관리하는 핵심 뼈대
+
+uvicorn[standard]>=0.29.0
+# FastAPI라는 '앱'을 실제로 구동시켜 주는 비동기 웹 서버(ASGI) 엔진
+# Dockerfile 마지막 줄에 있는 uvicorn main:app --host 0.0.0.0 --port 8000 명령어가 바로 이 녀석을 실행하는 것
+# [standard] 옵션이 붙어 있어 고성능 웹소켓 통신에 필요한 C언어 기반의 필수 확장 패키지(uvloop, websockets 등)가 함께 설치되어 속도가 비약적으로 빨라짐 
+
+sqlalchemy>=2.0.0
+# 파이썬 코드와 데이터베이스(DB) 사이를 연결하고 쿼리를 안전하게 날릴 수 있도록 돕는 데이터베이스 툴킷(ORM)
+# database.py와 models.py에서 SQLite 데이터베이스와 연결(database_url)을 맺고, 
+# 테이블을 생성하거나 트랜잭션을 관리할 때 기반이 되는 라이브러리
+# (특히 현재는 raw SQL 커서 위주로 짜여 있더라도, 향후 확장이나 커넥션 풀링을 위해 필수적)
+
+pydantic>=2.0.0
+# 들어오고 나가는 데이터의 타입을 검증(Validation)하고 스키마를 정의하는 라이브러리
+# models.py에서 TaskStartRequest(BaseModel)나 ErrorLogRequest(BaseModel)를 정의할 때 사용
+# 프론트엔드나 Tkinter에서 보낸 JSON 데이터에 mode_id나 error_code가 올바른 타입으로 들어왔는지 main.py가 실행되기 전에 입구에서 자동 컷팅/검증해 주는 보안관 역할을 함
+
+websockets>=12.0
+# 웹소켓 프로토콜을 파이썬에서 네이티브하게 다룰 수 있도록 지원하는 핵심 통신 라이브러리
+# connection_manager.py가 여러 개의 브라우저나 Tkinter 클라이언트들과 연결을 맺고 끊으며, 
+# broadcast() 함수를 통해 로봇의 실시간 상태 좌표나 에러 코드를 단 1밀리초의 지연도 없이 실시간으로 밀어내기(Push) 할 수 있도록 통신 통로를 깔끔하게 뚫어줌 
+sounddevice
+soundfile
+numpy
+
+openai>=1.40.0
+# services/llm_service.py의 AsyncOpenAI, stt_tts/stt_service.py의 Whisper 변환,
+# stt_tts/tts_service.py의 TTS 합성까지 이 프로젝트의 모든 OpenAI 호출이 의존하는 SDK

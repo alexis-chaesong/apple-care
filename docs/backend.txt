@@ -1,0 +1,35 @@
+# Backend Architecture Principles & Design Decision
+
+1. "역할이 다르면 파일이 다르다" 원칙 (Single Responsibility)
+
+    기존 패턴 준수: robot_bridge.py(ROS 스레드 → Queue 적재)와 connection_manager.py(WebSocket 생명주기 관리)가 서로의 내부 구현을 모르게 분리했던 기존 설계를 VLA 및 HITL 영역에도 동일 적용.
+    신규 컴포넌트 간 관심사 분리:
+
+        services/llm_service.py: Open ai API 호출 및 프롬프팅만 담당. 상위 Decision Planner의 활용 방식은 관여하지 않음.
+        services/decision_planner.py: 현재 상황에 대한 "판단 로직"만 담당. LLM 내부 호출 방식이나 구체적인 DB 저장 구조는 모름.
+        services/bayesian_policy.py: α,β 분포 기반의 순수 수학적/통계적 계산만 담당. HTTP 통신이나 LLM 인프라와 완전히 격리.
+
+    도입 기대 효과: 향후 LLM 모델 교체(예: OpenAI ↔ Anthropic)나 베이지안 알고리즘 독립 테스트 시, 타 모듈을 건드리지 않고 해당 파일만 격리하여 수정/검증 가능.
+
+2. "Thread/Process/Slow I/O 경계 분리" 원칙
+
+    기존 패턴 준수: ROS 콜백 내에서 웹소켓을 직접 부르지 않고 call_soon_threadsafe를 통해 메인 이벤트 루프 Queue로 넘기던 비동기 경계 관리 패턴 계승.
+    병목 및 복잡도 분리: 본 프로젝트에서 가장 느린 비동기 I/O는 LLM/STT/TTS 외부 API 호출 및 하드웨어 연동임. 이를 관리하기 위해 물리적/논리적 영역 격리.
+        
+        state/hitl_state_machine.py 격리: HITL 대화 흐름(Hold → Asking → Listening → Resume)은 복잡한 시간축 상태 전이를 가짐. 순간의 판단을 하는 decision_planner.py와 대화 흐름을 관리하는 상태 머신을 섞으면 로봇 데드락이나 중복 질문 버그 디버깅이 지옥이 되므로 분리.
+        stt_tts/ 폴더 격리: 오디오 I/O는 마이크 인식, 라이브러리 의존성 등 하드웨어 종속적 이슈가 잦은 영역. 핵심 비즈니스 로직(VLA 판단)과 폴더 수준에서 물리 분리하여 "오디오 문제"와 "판단 로직 문제"의 디버깅 경계를 명확히 함.
+
+3. "설정과 스키마는 항상 중앙 한 곳에서" 원칙
+
+    기존 패턴 준수: 다른 모듈이 os.environ을 직접 읽지 않고 하나의 전역 settings 객체를 통해서만 설정에 접근하던 패턴 유지.
+    중앙 집중화:
+
+        LLM API 키, Confidence Threshold, Bayesian 자동전환 임계값 등 신규 설정 변수를 모두 config.py 한 곳에 추가.
+        데이터 교환 스키마는 모두 models.py에 정의하여 하드코딩 방지.
+
+    도입 기대 효과: 현장 테스트 및 튜닝 시 소스코드 전체를 뒤질 필요 없이 config.py 내부의 임계값 숫자만 조정하여 즉시 대응 가능.
+
+4. [특이사항] 패턴 일관성 vs 폴더 순수성 (Queue 관리)
+
+    결정 사항: queues/queue_manager.py 같은 별도 모듈을 신설하지 않고, main.py 내부에 vision_queue, llm_queue를 전역 변수로 나란히 선언.
+    사유: 기존 코드가 broadcast_queue를 main.py 모듈 레벨 전역 변수로 선언하고 lifespan에서 consumer task를 등록하는 구조를 쓰고 있음. 구조적 순수성을 위해 폴더를 파는 것보다, 기존 코드의 작성 스타일과 "패턴 일관성"을 맞추는 것이 가독성과 유지보수에 훨씬 유리하다고 판단.
