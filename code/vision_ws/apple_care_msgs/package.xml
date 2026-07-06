@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>apple_care_msgs</name>
+  <version>0.0.0</version>
+  <description>apple-care 비전 노드에서 사용하는 서비스 인터페이스</description>
+  <maintainer email="pfr0213@gmail.com">root</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+</package>
