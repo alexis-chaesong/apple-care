@@ -1,0 +1,272 @@
+# IDLE→HOLD→ASKING→LISTENING→INTERPRETING→RESUME
+# 로봇 Hold~Resume까지의 대화 상태 전이 관리 (가장 꼬이기 쉬운 부분이라 별도 모듈로 격리)
+
+"""
+hitl_state_machine.py
+======================
+로봇이 Hold된 순간부터 사람의 답을 받아 Resume하기까지의 전체 대화 흐름을 관리.
+
+상태 전이:
+    IDLE -> HOLD -> ASKING -> LISTENING -> INTERPRETING -> RESUME
+                       ^                        |
+                       |___(재질문, 최대 N회)_____|
+                                                 |
+                                      (N회 초과) -> STUCK (사람 개입 필요, HOLD 유지)
+
+핵심 설계: STT 음성 답변과 HMI 수동 텍스트 입력을 asyncio.Future 하나로 통합.
+    질문을 던지는 순간 "답변 대기용 Future"를 하나 열어두고,
+    stt_service가 마이크로 들은 답이든, hitl_router.py가 HMI에서 받은 수동 입력이든
+    먼저 도착하는 쪽이 submit_answer()를 통해 이 Future를 채운다.
+    두 입력 경로가 서로 다른 상태를 갖지 않고 완전히 동일하게 처리되어
+    "STT 듣는 중에 관리자가 텍스트를 입력하면?" 같은 경합 상황이 자연스럽게 해소됨.
+
+동시 Unknown Object 처리 (기획서 12번 예외3 관련):
+    이미 세션이 진행 중일 때 새로운 ask_human 요청이 들어오면
+    거부하거나 무시하지 않고 _pending 큐에 쌓아둠. 현재 세션이 끝나면
+    (성공적으로 RESUME 하든, 재질문 횟수를 다 써서 STUCK에 빠지든)
+    다음 대기 항목을 이어서 처리함. MVP 범위: 동시에 여러 개를 병렬로
+    질문하지는 않음 (사람이 한 번에 하나씩만 답할 수 있다고 가정).
+
+STT/TTS 모듈에 기대하는 인터페이스 (다음 단계에서 구현 예정):
+    stt_tts.stt_service.listen_once(timeout_sec: float) -> Optional[str]
+        - 지정 시간 내에 음성을 텍스트로 변환해 반환, 못 들으면 None
+    stt_tts.tts_service.speak(text: str) -> None (async)
+        - 문장을 음성으로 출력, 출력이 끝날 때까지 대기
+"""
+
+import asyncio
+import logging
+from collections import deque
+from dataclasses import dataclass, field as dc_field
+from enum import Enum
+from typing import Optional
+
+from config import settings
+from robot_bridge import bridge_manager
+from services import llm_service
+from services.llm_service import LLMTimeoutError, LLMParseError
+from services.bayesian_policy import record_human_feedback
+
+logger = logging.getLogger(__name__)
+
+
+class HITLState(str, Enum):
+    IDLE = "IDLE"
+    HOLD = "HOLD"
+    ASKING = "ASKING"
+    LISTENING = "LISTENING"
+    INTERPRETING = "INTERPRETING"
+    STUCK = "STUCK"
+    # STUCK: 재질문 한도를 다 썼는데도 해석 실패. 로봇은 계속 Hold 상태.
+    # 여기서 벗어나려면 관리자가 /api/robot/reset을 명시적으로 호출해야 함
+    # (자동으로 아무거나 추측해서 진행하면 절대 안 되므로 의도적으로 만든 막다른 상태)
+
+
+@dataclass
+class HITLSession:
+    fruit_type: str
+    condition: str
+    vision_confidence: float
+    state: HITLState = HITLState.IDLE
+    attempt: int = 0
+    session_id: str = dc_field(default_factory=lambda: __import__("uuid").uuid4().hex[:8])
+
+
+class HITLStateMachine:
+    """
+    프로젝트 전체에서 단 하나만 존재하는 싱글톤.
+    bridge_manager, connection_manager와 동일한 전역 인스턴스 패턴.
+    """
+
+    def __init__(self) -> None:
+        self._current: Optional[HITLSession] = None
+        self._answer_future: Optional[asyncio.Future] = None
+        self._pending: deque[tuple[str, str, float]] = deque()
+        self._lock = asyncio.Lock()
+        # _lock: _current와 _pending을 동시에 여러 코루틴이 건드리는 것을 방지.
+        # (예: consumer loop가 새 ask_human을 넣는 동시에 세션 종료 처리가 겹치는 경우)
+
+    # ------------------------------------------------------------------
+    # 외부(consumer loop, decision_planner 호출부)에서 부르는 진입점
+    # ------------------------------------------------------------------
+    async def handle_ask_human(
+        self, fruit_type: str, condition: str, vision_confidence: float
+    ) -> None:
+        """
+        decision_planner.decide()가 action="ask_human"을 반환했을 때 호출.
+        이미 세션이 진행 중이면 대기열에 쌓고, 아니면 즉시 세션을 시작.
+        블로킹하지 않도록 백그라운드 task로 실행됨 (main.py의 consumer loop가
+        HITL 대화가 끝날 때까지 다른 Vision 프레임 처리를 멈추지 않게 하기 위함).
+        """
+        async with self._lock:
+            if self._current is not None:
+                logger.info(
+                    "HITL 세션 진행 중, 대기열에 추가: fruit=%s condition=%s",
+                    fruit_type, condition,
+                )
+                self._pending.append((fruit_type, condition, vision_confidence))
+                return
+            self._current = HITLSession(
+                fruit_type=fruit_type,
+                condition=condition,
+                vision_confidence=vision_confidence,
+            )
+
+        asyncio.create_task(self._run_session())
+
+    # ------------------------------------------------------------------
+    # 답변 제출 (STT 백그라운드 리스너 / hitl_router.py 양쪽에서 공통 호출)
+    # ------------------------------------------------------------------
+    def submit_answer(self, raw_answer: str) -> bool:
+        """
+        음성이든 HMI 수동 입력이든, 답변 텍스트가 도착하면 이 함수 하나로 제출.
+        현재 열려있는 답변 대기 Future가 없으면(질문 중이 아니면) False를 반환하고 무시.
+        """
+        if self._answer_future is not None and not self._answer_future.done():
+            self._answer_future.set_result(raw_answer)
+            return True
+        logger.warning("현재 대기 중인 HITL 질문이 없는데 답변이 도착함: %s", raw_answer)
+        return False
+
+    @property
+    def current_session(self) -> Optional[HITLSession]:
+        """hitl_router.py가 '지금 이 답변이 어떤 fruit_type/condition에 대한 것인지'
+        알아야 할 때 조회용으로 사용"""
+        return self._current
+
+    # ------------------------------------------------------------------
+    # 내부 세션 실행 루프
+    # ------------------------------------------------------------------
+    async def _run_session(self) -> None:
+        session = self._current
+        assert session is not None
+
+        bridge_manager.publish_command(
+            command_type="HOLD",
+            payload={"fruit_type": session.fruit_type, "condition": session.condition},
+        )
+        session.state = HITLState.HOLD
+        logger.info(
+            "HITL 세션 시작 (session_id=%s): fruit=%s condition=%s",
+            session.session_id, session.fruit_type, session.condition,
+        )
+
+        try:
+            while session.attempt < settings.hitl_max_reask_attempts:
+                resolved = await self._ask_and_wait(session)
+                if resolved:
+                    return  # 성공적으로 해석/저장/RESUME까지 완료
+                session.attempt += 1
+                logger.info(
+                    "재질문 진행 (session_id=%s, attempt=%d/%d)",
+                    session.session_id, session.attempt, settings.hitl_max_reask_attempts,
+                )
+
+            # 재질문 한도 초과 -> STUCK. 절대 자동으로 아무 destination이나 추측하지 않음
+            session.state = HITLState.STUCK
+            logger.error(
+                "HITL 세션 STUCK (session_id=%s): fruit=%s condition=%s - 관리자 개입 필요",
+                session.session_id, session.fruit_type, session.condition,
+            )
+            # 로봇은 계속 HOLD 상태 유지. 관리자가 /api/robot/reset 등으로 직접 개입해야 함
+
+        finally:
+            self._answer_future = None
+            async with self._lock:
+                self._current = None
+            await self._start_next_pending()
+
+    async def _ask_and_wait(self, session: HITLSession) -> bool:
+        """
+        질문 1회 던지고 답을 기다려 해석/저장까지 시도.
+        성공(RESUME까지 완료)하면 True, 실패(재질문 필요)하면 False 반환.
+        """
+        # 1) 질문 생성 및 TTS 출력
+        session.state = HITLState.ASKING
+        try:
+            fruit_guess = session.fruit_type if session.fruit_type != "unknown" else None
+            question = await llm_service.generate_unknown_question(fruit_guess)
+        except (LLMTimeoutError, LLMParseError):
+            # 질문 생성 자체가 실패하면 정형화된 fallback 문장 사용
+            # (여기서마저 실패하면 로봇이 영원히 조용히 멈춰있게 되므로 반드시 fallback 필요)
+            logger.warning("질문 생성 실패, fallback 문장 사용 (session_id=%s)", session.session_id)
+            question = f"{session.fruit_type} 처리 방법을 확인해 주세요. 정상, 가공, 폐기 중 선택해 주세요."
+
+        from stt_tts import tts_service  # 지연 import: 순환 참조 방지 및 아직 미구현 상태 대비
+        await tts_service.speak(question)
+
+        # 2) 답변 대기 (STT 백그라운드 + 수동 입력 동시 대기)
+        session.state = HITLState.LISTENING
+        self._answer_future = asyncio.get_event_loop().create_future()
+        stt_task = asyncio.create_task(self._listen_via_stt())
+
+        try:
+            raw_answer = await asyncio.wait_for(
+                self._answer_future, timeout=settings.hitl_response_timeout_sec
+            )
+        except asyncio.TimeoutError:
+            logger.info("답변 대기 타임아웃 (session_id=%s)", session.session_id)
+            return False
+        finally:
+            stt_task.cancel()
+
+        # 3) LLM 해석
+        session.state = HITLState.INTERPRETING
+        try:
+            interpreted = await llm_service.interpret_human_answer(raw_answer)
+        except (LLMTimeoutError, LLMParseError):
+            logger.warning("답변 해석 실패 (session_id=%s): %s", session.session_id, raw_answer)
+            return False
+
+        destination = interpreted.get("destination")
+        if destination is None:
+            logger.info("애매한 답변으로 재질문 필요 (session_id=%s): %s", session.session_id, raw_answer)
+            return False
+
+        # 4) 정책 학습 반영 + 로봇 재개
+        updated_policy = record_human_feedback(
+            fruit_type=session.fruit_type,
+            condition=session.condition,
+            destination=destination,
+            raw_answer=raw_answer,
+            session_id=session.session_id,
+        )
+        bridge_manager.publish_command(
+            command_type="RESUME",
+            payload={"fruit_type": session.fruit_type, "destination": destination},
+        )
+        logger.info(
+            "HITL 세션 완료 (session_id=%s): destination=%s confidence=%.2f",
+            session.session_id, destination, updated_policy["confidence"],
+        )
+        return True
+
+    async def _listen_via_stt(self) -> None:
+        """STT로 음성을 듣고, 인식되면 submit_answer()로 Future를 채움.
+        HMI 수동 입력이 먼저 도착해 Future가 이미 닫혔다면 조용히 무시됨."""
+        from stt_tts import stt_service  # 지연 import
+
+        try:
+            raw = await stt_service.listen_once(timeout_sec=settings.hitl_response_timeout_sec)
+            if raw:
+                self.submit_answer(raw)
+        except asyncio.CancelledError:
+            # 수동 입력이 먼저 도착해 정상적으로 취소된 경우 - 에러 아님
+            raise
+        except Exception:  # noqa: BLE001
+            logger.error("STT 리스닝 중 예외 발생", exc_info=True)
+
+    async def _start_next_pending(self) -> None:
+        """현재 세션이 끝난 뒤, 대기열에 쌓인 다음 ask_human 요청을 이어서 시작"""
+        async with self._lock:
+            if not self._pending or self._current is not None:
+                return
+            fruit_type, condition, confidence = self._pending.popleft()
+            self._current = HITLSession(
+                fruit_type=fruit_type, condition=condition, vision_confidence=confidence
+            )
+        asyncio.create_task(self._run_session())
+
+
+# 전역 싱글톤 인스턴스
+hitl_state_machine = HITLStateMachine()
