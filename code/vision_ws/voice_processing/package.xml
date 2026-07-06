@@ -3,9 +3,14 @@
 <package format="3">
   <name>voice_processing</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>웨이크워드+STT+키워드추출 음성 인식과, 미확인 물체 감지 시 질문을 트리거하는 노드</description>
   <maintainer email="pfr0213@gmail.com">root</maintainer>
   <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>apple_care_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
