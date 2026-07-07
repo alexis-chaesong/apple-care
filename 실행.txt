@@ -1,0 +1,19 @@
+# 로봇 실행
+로봇패키지 소스
+roboton 아니면 bring_rg
+
+# realsense
+realsense
+
+# 백엔드, 프론드 단축어 - 앞에 경로 본인 상황에 맞게 수정할 것
+alias bck='cd ~/apple-care/code/backend && uvicorn main:app --reload'
+alias fr='cd ~/apple-care/code/hmi_app && python3 view/dashboard.py'
+
+# vision_ws - 앞에 경로 본인 상황에 맞게 수정할 것
+cd ~/apple-care/code/vision_ws && colcon build --symlink-install
+source install/setup.bash
+
+# robot_ws - 앞에 경로 본인 상황에 맞게 수정할 것
+cd ~/apple-care/code/robot_ws && colcon build --symlink-install
+source install/setup.bash
+
