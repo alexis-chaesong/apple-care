@@ -27,7 +27,6 @@ setup(
     entry_points={
         'console_scripts': [
             'object_detection = obj_detection.detection:main',
-            'vision_bridge = obj_detection.vision_bridge:main',
         ],
     },
 )

@@ -17,12 +17,17 @@ robot_bridge.py와 동일한 원칙:
 "주기적으로 서비스를 호출하는 폴링 클라이언트"로 구현되어 있음.
 
 필드 매핑 (사용자 확정):
-    status=apple_normal  -> fruit_type=apple, defect_type=None
-    status=apple_rotten  -> fruit_type=apple, defect_type=mold
-    status=apple_damaged -> fruit_type=apple, defect_type=bruise
-    status=unknown       -> fruit_type=unknown, unknown_flag=True
+    status=apple_normal        -> fruit_type=apple, defect_type=None
+    status=apple_rotten        -> fruit_type=apple, defect_type=mold
+    status=apple_damaged       -> fruit_type=apple, defect_type=bruise
+    status=apple_small_normal  -> fruit_type=apple, defect_type=None, size=small
+    status=apple_small_damaged -> fruit_type=apple, defect_type=None, size=small
+        (vision이 depth로 실측한 결과 "손상이 아니라 원래 작은 사과"라고 재분류한
+        것들. _normal과 _damaged는 원래 YOLO가 뭐라고 봤었는지 추적용 구분일 뿐,
+        여기서는 둘 다 손상 아님으로 취급 - defect_type/size 처리는 동일함)
+    status=unknown             -> fruit_type=unknown, unknown_flag=True
     status=empty         -> 무시(큐에 안 넣음), 디바운스 상태 리셋
-    size, bbox           -> 항상 None (Vision이 안 줌)
+    bbox                 -> 항상 None (Vision이 안 줌)
     confidence           -> 서비스 응답 그대로 (이미 0~1 스케일)
     position             -> center
 
@@ -67,6 +72,10 @@ ROS_NODE_NAME = "fastapi_vision_bridge"
 SERVICE_NAME = "get_apple_status"
 SPIN_TIMEOUT_SEC = 0.1
 
+# "empty" 응답이 몇 번 연속으로 와야 진짜로 물체가 사라졌다고 보고 디바운스를 리셋할지.
+# 1이면 예전 동작(즉시 리셋)과 같음.
+EMPTY_RESET_STREAK = 3
+
 # obj_detection/yolo.py의 CLASS_NAMES + detection.py가 붙이는 unknown/empty를 포함한
 # 전체 status 값 중, 실제 fruit_type/defect_type으로 명확히 매핑되는 3가지만 여기 정의.
 # unknown/empty는 별도 분기로 처리함 (아래 _ros_response_to_vision_feature 참고)
@@ -74,6 +83,14 @@ STATUS_TO_FRUIT_DEFECT = {
     "apple_normal": ("apple", None),
     "apple_rotten": ("apple", "mold"),
     "apple_damaged": ("apple", "bruise"),
+    "apple_small_normal": ("apple", None),
+    "apple_small_damaged": ("apple", None),
+}
+
+# size 필드로 넘겨야 하는 status 값 (defect_type과는 별개로 취급됨).
+STATUS_TO_SIZE = {
+    "apple_small_normal": "small",
+    "apple_small_damaged": "small",
 }
 
 
@@ -111,10 +128,11 @@ def _ros_response_to_vision_feature(response) -> Optional[VisionFeatureIn]:
         unknown_flag = False
         if status not in STATUS_TO_FRUIT_DEFECT:
             logger.warning("알 수 없는 Vision status 값: %s (fruit_type으로 그대로 사용)", status)
+    size = STATUS_TO_SIZE.get(status)
 
     return VisionFeatureIn(
         fruit_type=fruit_type,
-        size=None,
+        size=size,
         defect_type=defect_type,
         confidence=confidence,
         unknown_flag=unknown_flag,
@@ -141,6 +159,11 @@ class VisionBridgeManager:
         # 디바운스 상태: 직전에 큐에 넣었던 (status, position)
         self._last_status: Optional[str] = None
         self._last_position: Optional[list[float]] = None
+        # "empty" 응답이 이 횟수만큼 연속으로 와야 디바운스 상태를 초기화한다.
+        # depth 판정이 경계값 근처라 "empty"/"unknown"을 한두 번씩 flicker할 수 있는데,
+        # 매번 바로 리셋하면 사실 같은 물체를 계속 "새로 감지됨"으로 취급해 ask_human이
+        # 반복 발생(HITL 팝업 스팸)하므로 약간의 유예(hysteresis)를 둔다.
+        self._empty_streak = 0
 
     # ------------------------------------------------------------------
     def start_bridge(self, fastapi_loop: AbstractEventLoop, output_queue: Queue) -> None:
@@ -237,10 +260,16 @@ class VisionBridgeManager:
 
         try:
             if response.status == "empty":
-                # 물체가 사라졌으니 디바운스 상태 초기화 - 다음 감지는 무조건 "새 사과"로 취급
-                self._last_status = None
-                self._last_position = None
+                # depth 판정이 경계값 근처면 "empty"/"unknown"을 한두 번씩 flicker할 수
+                # 있으므로, 몇 번 연속으로 "empty"가 와야 진짜로 물체가 사라졌다고 보고
+                # 디바운스 상태를 리셋한다 (한 번의 flicker로 바로 리셋하면 같은 물체가
+                # 계속 "새로 감지됨"으로 취급되어 ask_human이 반복 발생함).
+                self._empty_streak += 1
+                if self._empty_streak >= EMPTY_RESET_STREAK:
+                    self._last_status = None
+                    self._last_position = None
                 return
+            self._empty_streak = 0
 
             position = list(response.position or [])
             if self._is_duplicate(response.status, position):

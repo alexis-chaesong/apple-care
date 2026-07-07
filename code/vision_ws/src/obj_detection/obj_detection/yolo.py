@@ -75,3 +75,25 @@ class AppleStatusModel:
         """단일 프레임에 YOLO 박스/라벨을 그려서 반환 (디버그 시각화용)."""
         results = self.model(frame, verbose=False)
         return results[0].plot()
+
+    def get_all_detections(self, frame):
+        """단일 프레임에서 YOLO가 찾은 모든 후보 박스를 반환 (디버그 시각화용).
+
+        get_best_detection처럼 1초 동안 프레임을 모아 최고 confidence 하나만
+        고르는 게 아니라, 화면에 보이는 모든 사과를 depth 디버그 창에 동시에
+        표시하기 위해 단일 프레임에 대해 즉시 추론한다.
+
+        반환값: [(class_name, confidence, box[x1,y1,x2,y2]), ...]
+        """
+        results = self.model(frame, verbose=False)
+        detections = []
+        for res in results:
+            for box, score, label in zip(
+                res.boxes.xyxy.tolist(),
+                res.boxes.conf.tolist(),
+                res.boxes.cls.tolist(),
+            ):
+                if score < MIN_CANDIDATE_CONFIDENCE:
+                    continue
+                detections.append((CLASS_NAMES[int(label)], score, box))
+        return detections

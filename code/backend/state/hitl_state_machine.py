@@ -208,6 +208,21 @@ class HITLStateMachine:
             "HITL 세션 시작 (session_id=%s): fruit=%s condition=%s",
             session.session_id, session.fruit_type, session.condition,
         )
+        # VLA_ASK_HUMAN은 여기서 "실제로 세션이 시작될 때" 딱 한 번만 브로드캐스트한다.
+        # (예전엔 consumer loop가 ask_human 판정이 나올 때마다 매번 브로드캐스트했는데,
+        # 이미 세션이 진행 중이면 handle_ask_human()이 _pending에 쌓기만 하고 여기까지
+        # 안 오므로, vision이 flicker로 같은 물체를 반복 보고해도 팝업이 스팸처럼
+        # 계속 새로 뜨지 않음. 대기열에서 다음 항목이 시작될 때도 자연히 한 번 더 뜬다.)
+        await connection_manager.broadcast({
+            "type": "VLA_ASK_HUMAN",
+            "payload": {
+                "session_id": session.session_id,
+                "fruit_type": session.fruit_type,
+                "condition": session.condition,
+                "confidence": session.vision_confidence,
+            },
+            "timestamp": time.time(),
+        })
 
         try:
             while session.attempt < settings.hitl_max_reask_attempts:
