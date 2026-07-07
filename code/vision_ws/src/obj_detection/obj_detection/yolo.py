@@ -12,10 +12,10 @@ PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
 YOLO_MODEL_FILENAME = "best_apple_care.pt"
 YOLO_MODEL_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_MODEL_FILENAME)
 
-CLASS_NAMES = ["apple_normal", "apple_rotten", "apple_damaged"]
+CLASS_NAMES = ["apple_normal", "apple_rotten", "apple_damaged", "apple_small"]
 
 # 이 값보다 낮은 confidence로 감지된 박스는 "unknown"으로 취급한다
-# (apple_normal/rotten/damaged로 학습된 3클래스 중 어디에도 확신 없다는 뜻)
+# (apple_normal/rotten/damaged/small로 학습된 4클래스 중 어디에도 확신 없다는 뜻)
 MIN_KNOWN_CONFIDENCE = 0.4
 
 # 프레임 수집 단계에서 후보로 남길 최소 confidence (이후 최종 판정은 MIN_KNOWN_CONFIDENCE로 함)
