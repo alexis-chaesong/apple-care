@@ -198,16 +198,18 @@ async def _vla_consumer_loop() -> None:
                     # result.condition은 decision_planner.decide()가 이미 계산해 넘겨준 값을
                     # 그대로 재사용 (여기서 조건을 다시 계산하면 우선순위 로직이 두 군데로
                     # 흩어져 서로 어긋날 위험이 있으므로 반드시 decide()의 결과만 신뢰함)
+                    #
+                    # VLA_ASK_HUMAN 브로드캐스트는 여기서 하지 않는다 - 세션이 이미
+                    # 진행 중이면 handle_ask_human()이 대기열에 쌓기만 하는데, 예전엔
+                    # 그래도 매번 여기서 브로드캐스트해서 같은 물체의 flicker/재시도마다
+                    # HITL 팝업이 반복해서 새로 뜨는 문제가 있었음. 이제
+                    # hitl_state_machine._run_session()이 실제 세션 시작 시점에만
+                    # 한 번 브로드캐스트한다.
                     await hitl_state_machine.handle_ask_human(
                         fruit_type=result.fruit_type,
                         condition=result.condition,
                         vision_confidence=result.confidence,
                     )
-                    await connection_manager.broadcast({
-                        "type": "VLA_ASK_HUMAN",
-                        "payload": result.model_dump(),
-                        "timestamp": time.time(),
-                    })
 
             except Exception:  # noqa: BLE001
                 logger.error("VLA 판단 처리 중 에러 발생", exc_info=True)

@@ -446,6 +446,17 @@ class VLASorterDashboard:
         messagebox.showerror("긴급 정지 (E-STOP)", "로봇 및 선별 컨베이어 제어 노드가 즉각 차단되었습니다.")
 
     def trigger_hitl_popup(self, payload=None):
+        # 이미 팝업이 떠 있으면 새 창을 또 띄우지 않는다. VLA_ASK_HUMAN이 짧은 간격으로
+        # 여러 번 와도(같은 물체에 대한 재질문/디바운스 실패 등) 창이 계속 쌓이는 걸 방지.
+        if self.hitl_popup is not None:
+            try:
+                if self.hitl_popup.winfo_exists():
+                    self.log_message("[HITL] 이미 열려있는 팝업이 있어 새 팝업을 건너뜀")
+                    return
+            except tk.TclError:
+                pass
+            self.hitl_popup = None
+
         # 사이드바 "작업자 지시 대기" 버튼으로 수동 테스트할 때는 payload가 없으므로
         # 예전과 동일한 더미 데이터를 사용. WebSocket으로 VLA_ASK_HUMAN이 오면
         # main.py의 decision_planner.DecisionResult를 그대로 담은 실제 payload가 들어옴
