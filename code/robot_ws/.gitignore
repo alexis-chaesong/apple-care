@@ -2,10 +2,9 @@
 __pycache__/
 *.pyc
 
-# SQLite 데이터베이스 파일 (데이터 저장용 파일은 깃에 올리지 않음)
-data/robot_system.db
-*.db
-
+build
+install
+log
 
 # 가상환경 및 OS 임시 파일
 .venv/
