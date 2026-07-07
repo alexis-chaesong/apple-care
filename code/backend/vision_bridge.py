@@ -17,15 +17,14 @@ robot_bridge.py와 동일한 원칙:
 "주기적으로 서비스를 호출하는 폴링 클라이언트"로 구현되어 있음.
 
 필드 매핑 (사용자 확정):
-    status=apple_normal        -> fruit_type=apple, defect_type=None
-    status=apple_rotten        -> fruit_type=apple, defect_type=mold
-    status=apple_damaged       -> fruit_type=apple, defect_type=bruise
-    status=apple_small_normal  -> fruit_type=apple, defect_type=None, size=small
-    status=apple_small_damaged -> fruit_type=apple, defect_type=None, size=small
-        (vision이 depth로 실측한 결과 "손상이 아니라 원래 작은 사과"라고 재분류한
-        것들. _normal과 _damaged는 원래 YOLO가 뭐라고 봤었는지 추적용 구분일 뿐,
-        여기서는 둘 다 손상 아님으로 취급 - defect_type/size 처리는 동일함)
-    status=unknown             -> fruit_type=unknown, unknown_flag=True
+    status=apple_normal  -> fruit_type=apple, defect_type=None
+    status=apple_rotten  -> fruit_type=apple, defect_type=mold
+    status=apple_damaged -> fruit_type=apple, defect_type=bruise
+    status=apple_small   -> fruit_type=apple, defect_type=None, size=small
+        (예전에는 depth 실측 지름으로 apple_normal/apple_damaged를 재분류해
+        apple_small_normal/apple_small_damaged 두 값으로 냈지만, 이제 vision이
+        apple_small을 직접 학습한 모델을 쓰므로 YOLO가 낸 라벨을 그대로 받음)
+    status=unknown        -> fruit_type=unknown, unknown_flag=True
     status=empty         -> 무시(큐에 안 넣음), 디바운스 상태 리셋
     bbox                 -> 항상 None (Vision이 안 줌)
     confidence           -> 서비스 응답 그대로 (이미 0~1 스케일)
@@ -77,20 +76,18 @@ SPIN_TIMEOUT_SEC = 0.1
 EMPTY_RESET_STREAK = 3
 
 # obj_detection/yolo.py의 CLASS_NAMES + detection.py가 붙이는 unknown/empty를 포함한
-# 전체 status 값 중, 실제 fruit_type/defect_type으로 명확히 매핑되는 3가지만 여기 정의.
+# 전체 status 값 중, 실제 fruit_type/defect_type으로 명확히 매핑되는 값들만 여기 정의.
 # unknown/empty는 별도 분기로 처리함 (아래 _ros_response_to_vision_feature 참고)
 STATUS_TO_FRUIT_DEFECT = {
     "apple_normal": ("apple", None),
     "apple_rotten": ("apple", "mold"),
     "apple_damaged": ("apple", "bruise"),
-    "apple_small_normal": ("apple", None),
-    "apple_small_damaged": ("apple", None),
+    "apple_small": ("apple", None),
 }
 
 # size 필드로 넘겨야 하는 status 값 (defect_type과는 별개로 취급됨).
 STATUS_TO_SIZE = {
-    "apple_small_normal": "small",
-    "apple_small_damaged": "small",
+    "apple_small": "small",
 }
 
 
