@@ -9,6 +9,8 @@
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <exec_depend>onrobot_rg_control</exec_depend>
+  <exec_depend>python3-pymodbus</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>
