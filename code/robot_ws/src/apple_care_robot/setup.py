@@ -23,6 +23,7 @@ setup(
             'motion_planner_node = apple_care_robot.motion_planner_node:main',
             'robot_controller_node = apple_care_robot.robot_controller_node:main',
             'box_sequence_test = apple_care_robot.box_sequence_test:main',
+            'apple_sorting_cycle = apple_care_robot.apple_sorting_cycle:main',
         ],
     },
 )
