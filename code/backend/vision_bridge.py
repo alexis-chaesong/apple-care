@@ -1,0 +1,298 @@
+"""
+vision_bridge.py
+=================
+Vision(obj_detection 패키지)의 get_apple_status ROS2 서비스를 주기적으로 폴링해서
+결과를 models.VisionFeatureIn으로 변환한 뒤 asyncio 큐(vision_queue)에 적재하는
+유일한 창구.
+
+robot_bridge.py와 동일한 원칙:
+  - ROS2 콜백/타이머 안에서는 절대 무거운 작업(DB 조회, LLM 호출 등)을 하지 않음.
+    여기서는 "서비스 호출 -> 응답을 VisionFeatureIn으로 변환 -> 큐 적재 예약"만 함.
+  - ROS2 스레드(SingleThreadedExecutor)와 FastAPI의 asyncio 이벤트 루프 사이를
+    call_soon_threadsafe()로 안전하게 넘나듦.
+  - 전역 싱글톤 패턴(vision_bridge_manager)으로 관리, main.py의 lifespan에서 start/shutdown.
+
+⚠️ Vision은 토픽을 publish하지 않고 요청-응답 서비스(get_apple_status)만 제공함
+(1단계 조사 결과). 그래서 robot_bridge.py처럼 "구독 콜백"이 아니라, ROS2 타이머로
+"주기적으로 서비스를 호출하는 폴링 클라이언트"로 구현되어 있음.
+
+필드 매핑 (사용자 확정):
+    status=apple_normal  -> fruit_type=apple, defect_type=None
+    status=apple_rotten  -> fruit_type=apple, defect_type=mold
+    status=apple_damaged -> fruit_type=apple, defect_type=bruise
+    status=unknown       -> fruit_type=unknown, unknown_flag=True
+    status=empty         -> 무시(큐에 안 넣음), 디바운스 상태 리셋
+    size, bbox           -> 항상 None (Vision이 안 줌)
+    confidence           -> 서비스 응답 그대로 (이미 0~1 스케일)
+    position             -> center
+
+디바운스: 폴링 방식 특성상 같은 사과가 안 치워졌으면 매 폴링마다 같은 결과가 반복됨.
+직전에 큐에 넣은 (status, position)과 이번 응답이 실질적으로 같으면(각 축
+vision_position_dedup_threshold_mm 이내) 큐에 넣지 않음. status가 바뀌었거나
+position이 유의미하게 다르면 "새 사과"로 취급해 큐에 넣음.
+"""
+
+import logging
+import threading
+import time
+from asyncio import AbstractEventLoop, Queue, QueueFull
+from typing import Optional
+
+import rclpy
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
+
+from config import settings
+from models import VisionFeatureIn
+
+logger = logging.getLogger(__name__)
+
+try:
+    from apple_care_msgs.srv import SrvAppleStatus
+except ModuleNotFoundError:
+    # vision_ws가 이 프로세스 환경에 build/source 되어 있지 않은 경우.
+    # Vision ROS2 폴링(get_apple_status)만 비활성화하고, 나머지 백엔드
+    # (로봇 제어, HITL, HTTP vla_router.py 경로 등)는 정상 동작해야 하므로
+    # 여기서 서버 전체를 죽이지 않고 경고만 남김 - 실제 비활성화는
+    # start_bridge()에서 SrvAppleStatus is None을 보고 처리함
+    SrvAppleStatus = None
+    logger.warning(
+        "apple_care_msgs를 찾을 수 없어 Vision ROS2 폴링을 비활성화합니다. "
+        "vision_ws에서 'colcon build --packages-select apple_care_msgs' 후 "
+        "'source install/setup.bash'를 실행한 뒤 서버를 재시작하세요. "
+        "그 전까지는 HTTP 경로(POST /api/vision/result)로만 Vision 데이터를 받습니다."
+    )
+
+ROS_NODE_NAME = "fastapi_vision_bridge"
+SERVICE_NAME = "get_apple_status"
+SPIN_TIMEOUT_SEC = 0.1
+
+# obj_detection/yolo.py의 CLASS_NAMES + detection.py가 붙이는 unknown/empty를 포함한
+# 전체 status 값 중, 실제 fruit_type/defect_type으로 명확히 매핑되는 3가지만 여기 정의.
+# unknown/empty는 별도 분기로 처리함 (아래 _ros_response_to_vision_feature 참고)
+STATUS_TO_FRUIT_DEFECT = {
+    "apple_normal": ("apple", None),
+    "apple_rotten": ("apple", "mold"),
+    "apple_damaged": ("apple", "bruise"),
+}
+
+
+def _positions_close(a: list[float], b: list[float], threshold_mm: float) -> bool:
+    """두 position(x,y,z)의 각 축 차이가 전부 threshold_mm 이내면 '같은 위치'로 봄."""
+    if not a or not b or len(a) != len(b):
+        return False
+    return all(abs(x - y) <= threshold_mm for x, y in zip(a, b))
+
+
+def _ros_response_to_vision_feature(response) -> Optional[VisionFeatureIn]:
+    """
+    SrvAppleStatus.Response -> VisionFeatureIn 변환.
+    status="empty"(물체 없음)는 호출부(_on_response)에서 이미 걸러내므로 여기서는
+    다루지 않음. confidence가 범위를 벗어나는 등 파싱/검증에 실패하면 None을 반환하고
+    호출부가 로그만 남기고 버리도록 함 (ROS2 콜백에서 예외를 그대로 던지면 안 됨).
+    """
+    status = response.status
+    confidence = float(response.confidence)
+    position = list(response.position) if response.position else []
+
+    if not (0.0 <= confidence <= 1.0):
+        logger.warning(
+            "Vision 서비스 confidence가 범위를 벗어남(%.3f), 메시지 버림: status=%s",
+            confidence, status,
+        )
+        return None
+
+    if status == "unknown":
+        fruit_type = "unknown"
+        defect_type = None
+        unknown_flag = True
+    else:
+        fruit_type, defect_type = STATUS_TO_FRUIT_DEFECT.get(status, (status, None))
+        unknown_flag = False
+        if status not in STATUS_TO_FRUIT_DEFECT:
+            logger.warning("알 수 없는 Vision status 값: %s (fruit_type으로 그대로 사용)", status)
+
+    return VisionFeatureIn(
+        fruit_type=fruit_type,
+        size=None,
+        defect_type=defect_type,
+        confidence=confidence,
+        unknown_flag=unknown_flag,
+        bbox=None,
+        center=position or None,
+        frame_id=None,
+    )
+
+
+class VisionBridgeManager:
+    """ROS2 서비스 클라이언트(get_apple_status) + 폴링 타이머 + Executor/Thread 생명주기 관리."""
+
+    def __init__(self) -> None:
+        self.node: Optional[Node] = None
+        self.client = None
+        self.executor: Optional[SingleThreadedExecutor] = None
+        self.ros_thread: Optional[threading.Thread] = None
+        self.loop: Optional[AbstractEventLoop] = None
+        self.queue: Optional[Queue] = None
+        self._stop_event = threading.Event()
+        self._poll_timer = None
+        self._pending_call = False  # 이전 폴링 응답이 아직 안 왔으면 중복 호출 방지
+
+        # 디바운스 상태: 직전에 큐에 넣었던 (status, position)
+        self._last_status: Optional[str] = None
+        self._last_position: Optional[list[float]] = None
+
+    # ------------------------------------------------------------------
+    def start_bridge(self, fastapi_loop: AbstractEventLoop, output_queue: Queue) -> None:
+        """main.py의 lifespan에서 호출되어 백그라운드 스레드로 ROS2 폴링을 구동함."""
+        if SrvAppleStatus is None:
+            # apple_care_msgs가 없는 환경 - 이미 모듈 로드 시점에 경고를 남겼으므로
+            # 여기서는 조용히 비활성화 상태로 남고 서버 나머지는 정상 기동되게 함
+            logger.warning("Vision Bridge 비활성화 상태로 시작 건너뜀 (apple_care_msgs 없음).")
+            return
+
+        if not rclpy.ok():
+            rclpy.init(args=None)
+
+        self.node = Node(ROS_NODE_NAME)
+        self.loop = fastapi_loop
+        self.queue = output_queue
+
+        self.client = self.node.create_client(SrvAppleStatus, SERVICE_NAME)
+
+        self.executor = SingleThreadedExecutor()
+        self.executor.add_node(self.node)
+
+        self._poll_timer = self.node.create_timer(
+            settings.vision_poll_interval_sec, self._poll_once
+        )
+
+        self._stop_event.clear()
+        self.ros_thread = threading.Thread(
+            target=self._spin_loop, name="ros2-vision-spin-thread", daemon=True
+        )
+        self.ros_thread.start()
+        logger.info(
+            "Vision Bridge 시작: service=%s poll_interval=%.2fs",
+            SERVICE_NAME, settings.vision_poll_interval_sec,
+        )
+
+    def shutdown(self) -> None:
+        logger.info("VisionBridgeManager shutdown 시작...")
+        self._stop_event.set()
+
+        if self.ros_thread is not None:
+            self.ros_thread.join(timeout=5.0)
+            if self.ros_thread.is_alive():
+                logger.warning("vision spin 스레드가 timeout 내에 종료되지 않았습니다.")
+
+        if self.executor is not None and self.node is not None:
+            self.executor.remove_node(self.node)
+        if self.node is not None:
+            self.node.destroy_node()
+
+        logger.info("VisionBridgeManager shutdown 완료.")
+
+    # ------------------------------------------------------------------
+    def _spin_loop(self) -> None:
+        assert self.executor is not None
+        logger.info("Vision ROS2 spin 루프 시작.")
+
+        while not self._stop_event.is_set():
+            try:
+                self.executor.spin_once(timeout_sec=SPIN_TIMEOUT_SEC)
+            except rclpy.executors.ExternalShutdownException:
+                logger.info("ExternalShutdownException 감지, vision spin 루프 종료.")
+                self._stop_event.set()
+                break
+            except Exception:  # noqa: BLE001
+                logger.error("vision spin_once 루프에서 예외 발생", exc_info=True)
+                time.sleep(0.5)
+
+        logger.info("Vision ROS2 spin 루프 종료.")
+
+    # ------------------------------------------------------------------
+    # 폴링 타이머 콜백 (ROS2 스레드에서 실행) - 절대 블로킹하지 않음
+    # ------------------------------------------------------------------
+    def _poll_once(self) -> None:
+        if self._pending_call:
+            # 이전 호출 응답이 아직 안 왔으면 이번 틱은 건너뜀 (중복 호출 누적 방지)
+            return
+        if self.client is None or not self.client.service_is_ready():
+            logger.debug("get_apple_status 서비스가 아직 준비되지 않음, 이번 폴링 건너뜀")
+            return
+
+        self._pending_call = True
+        future = self.client.call_async(SrvAppleStatus.Request())
+        future.add_done_callback(self._on_response)
+
+    def _on_response(self, future) -> None:
+        """서비스 응답 도착 콜백 (ROS2 스레드에서 실행)."""
+        self._pending_call = False
+        try:
+            response = future.result()
+        except Exception:  # noqa: BLE001
+            logger.error("get_apple_status 서비스 호출 실패", exc_info=True)
+            return
+
+        try:
+            if response.status == "empty":
+                # 물체가 사라졌으니 디바운스 상태 초기화 - 다음 감지는 무조건 "새 사과"로 취급
+                self._last_status = None
+                self._last_position = None
+                return
+
+            position = list(response.position or [])
+            if self._is_duplicate(response.status, position):
+                return
+
+            feature = _ros_response_to_vision_feature(response)
+            if feature is None:
+                return
+
+            self._last_status = response.status
+            self._last_position = position
+
+            self._dispatch(feature)
+
+        except Exception:  # noqa: BLE001
+            # ROS2 콜백에서 처리 안 된 예외가 올라가면 노드 전체가 죽을 수 있으므로
+            # 반드시 여기서 잡아서 로그만 남기고 이번 메시지는 버림
+            logger.error("Vision 서비스 응답 처리 중 예외 발생, 메시지를 버림", exc_info=True)
+
+    def _is_duplicate(self, status: str, position: list[float]) -> bool:
+        """직전에 큐에 넣은 (status, position)과 실질적으로 같으면 True (같은 사과)."""
+        if self._last_status is None or status != self._last_status:
+            return False
+        return _positions_close(
+            position, self._last_position or [], settings.vision_position_dedup_threshold_mm
+        )
+
+    # ------------------------------------------------------------------
+    def _dispatch(self, feature: VisionFeatureIn) -> None:
+        """ROS2 스레드 -> 메인 이벤트 루프로 vision_queue 적재 예약."""
+        if self.loop is not None and self.queue is not None:
+            self.loop.call_soon_threadsafe(self._enqueue, feature)
+
+    def _enqueue(self, feature: VisionFeatureIn) -> None:
+        """메인 이벤트 루프 안에서 실행됨 (call_soon_threadsafe로 스케줄됨)."""
+        try:
+            self.queue.put_nowait(feature)
+            logger.info(
+                "Vision 감지 결과 큐 적재: fruit_type=%s defect_type=%s confidence=%.2f unknown=%s",
+                feature.fruit_type, feature.defect_type, feature.confidence, feature.unknown_flag,
+            )
+        except QueueFull:
+            logger.warning("vision_queue가 가득 참, 가장 오래된 항목을 버리고 최신 데이터를 우선함")
+            try:
+                self.queue.get_nowait()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.queue.put_nowait(feature)
+            except QueueFull:
+                logger.warning("vision_queue가 여전히 가득 차 있어 메시지를 버립니다.")
+
+
+# 어디서나 싱글톤처럼 접근 가능하도록 전역 인스턴스 생성 (robot_bridge.py의 bridge_manager와 동일 패턴)
+vision_bridge_manager = VisionBridgeManager()

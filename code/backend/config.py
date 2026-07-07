@@ -188,6 +188,25 @@ class Settings:
     # 로컬(Mac) 개발 중엔 기본값 "afplay" 그대로 두고,
     # 실제 로봇 배포 환경(Ubuntu)에서는 .env에 TTS_AUDIO_PLAYER=ffplay 로 오버라이드
 
+    # -----------------------------
+    # Vision(ROS2 서비스 폴링) 관련 설정
+    # -----------------------------
+    vision_poll_interval_sec: float = field(
+        default_factory=lambda: float(os.getenv("VISION_POLL_INTERVAL_SEC", "0.5"))
+    )
+    # vision_poll_interval_sec: obj_detection 패키지의 get_apple_status 서비스를
+    # 얼마나 자주 호출할지. Vision이 토픽을 publish하는 게 아니라 요청-응답 서비스라서
+    # backend가 능동적으로 폴링해야 함 (voice_processing의 UnknownObjectWatcher가
+    # 쓰던 2초보다 짧게 잡아 반응성을 높임)
+
+    vision_position_dedup_threshold_mm: float = field(
+        default_factory=lambda: float(os.getenv("VISION_POSITION_DEDUP_THRESHOLD_MM", "5.0"))
+    )
+    # vision_position_dedup_threshold_mm: 직전 폴링 응답과 이번 응답의 position(x,y,z)
+    # 각 축 차이가 전부 이 값(mm) 이내면 "같은 사과가 아직 안 치워졌다"고 보고 큐에 넣지 않음.
+    # 폴링 방식 특유의 중복 처리 문제(같은 물체를 매 polling마다 새로 감지된 것처럼 착각)를
+    # 막기 위한 디바운스 임계값
+
 # 모듈 전역에서 공유하는 단일 설정 인스턴스.
 # 다른 파일에서는 `from config import settings` 로만 가져다 사용
 # settings = Settings(): 클래스를 정의하는 것에 그치지 않고, 실제로 사용할 단 하나의 설정 객체(Instance)를 미리 찍어냄 

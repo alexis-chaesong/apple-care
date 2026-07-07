@@ -237,7 +237,7 @@ class HITLStateMachine:
                     "condition": session.condition,
                 },
                 "timestamp": time.time(),
-            })
+            }) 
             return
 
         except Exception:

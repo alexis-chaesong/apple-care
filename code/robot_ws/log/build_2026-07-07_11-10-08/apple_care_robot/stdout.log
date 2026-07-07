@@ -1,0 +1,53 @@
+running egg_info
+creating ../../build/apple_care_robot/apple_care_robot.egg-info
+writing ../../build/apple_care_robot/apple_care_robot.egg-info/PKG-INFO
+writing dependency_links to ../../build/apple_care_robot/apple_care_robot.egg-info/dependency_links.txt
+writing entry points to ../../build/apple_care_robot/apple_care_robot.egg-info/entry_points.txt
+writing requirements to ../../build/apple_care_robot/apple_care_robot.egg-info/requires.txt
+writing top-level names to ../../build/apple_care_robot/apple_care_robot.egg-info/top_level.txt
+writing manifest file '../../build/apple_care_robot/apple_care_robot.egg-info/SOURCES.txt'
+reading manifest file '../../build/apple_care_robot/apple_care_robot.egg-info/SOURCES.txt'
+writing manifest file '../../build/apple_care_robot/apple_care_robot.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build
+creating /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib
+creating /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot
+copying apple_care_robot/motion_planner_node.py -> /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot
+copying apple_care_robot/__init__.py -> /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot
+copying apple_care_robot/force_place.py -> /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot
+copying apple_care_robot/openclose.py -> /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot
+copying apple_care_robot/robot_controller_node.py -> /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot
+copying apple_care_robot/box_sequence_test.py -> /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot
+running install
+running install_lib
+creating /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot
+copying /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot/motion_planner_node.py -> /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot
+copying /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot/__init__.py -> /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot
+copying /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot/force_place.py -> /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot
+copying /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot/openclose.py -> /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot
+copying /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot/robot_controller_node.py -> /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot
+copying /home/rokey/apple-care/code/robot_ws/build/apple_care_robot/build/lib/apple_care_robot/box_sequence_test.py -> /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot
+byte-compiling /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot/motion_planner_node.py to motion_planner_node.cpython-310.pyc
+byte-compiling /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot/__init__.py to __init__.cpython-310.pyc
+byte-compiling /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot/force_place.py to force_place.cpython-310.pyc
+byte-compiling /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot/openclose.py to openclose.cpython-310.pyc
+byte-compiling /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot/robot_controller_node.py to robot_controller_node.cpython-310.pyc
+byte-compiling /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot/box_sequence_test.py to box_sequence_test.cpython-310.pyc
+running install_data
+creating /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/share
+creating /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/share/ament_index
+creating /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/share/ament_index/resource_index
+creating /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/share/ament_index/resource_index/packages
+copying resource/apple_care_robot -> /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/share/ament_index/resource_index/packages
+creating /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/share/apple_care_robot
+copying package.xml -> /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/share/apple_care_robot
+creating /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/share/apple_care_robot/launch
+copying launch/apple_care.launch.py -> /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/share/apple_care_robot/launch
+running install_egg_info
+Copying ../../build/apple_care_robot/apple_care_robot.egg-info to /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/lib/python3.10/site-packages/apple_care_robot-0.0.1-py3.10.egg-info
+running install_scripts
+Installing box_sequence_test script to /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/bin
+Installing motion_planner_node script to /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/bin
+Installing robot_controller_node script to /home/rokey/apple-care/code/robot_ws/install/apple_care_robot/bin
+writing list of installed files to '/home/rokey/apple-care/code/robot_ws/build/apple_care_robot/install.log'

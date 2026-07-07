@@ -107,6 +107,7 @@ def decide(vision: VisionFeatureIn) -> DecisionResult:
             fruit_type=vision.fruit_type,
             condition=candidates[0],
             confidence=vision.confidence,
+            position=vision.center,
         )
 
     # 2) 매칭되는 정책 조회
@@ -131,6 +132,7 @@ def decide(vision: VisionFeatureIn) -> DecisionResult:
             fruit_type=vision.fruit_type,
             condition=condition,
             confidence=vision.confidence,
+            position=vision.center,
         )
 
     # 4) 신뢰할 수 있는 정책 존재 -> 자동 실행
@@ -149,4 +151,5 @@ def decide(vision: VisionFeatureIn) -> DecisionResult:
         fruit_type=vision.fruit_type,
         condition=condition,
         confidence=vision.confidence,
+        position=vision.center,
     )
