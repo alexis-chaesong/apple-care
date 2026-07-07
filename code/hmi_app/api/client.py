@@ -72,27 +72,61 @@ def post_policy_command(raw_text: str) -> dict:
     return resp.json()
 
 
+def post_robot_start() -> dict:
+    """POST /api/robot/start -> {"result": "SUCCESS", "command": "START"}"""
+    resp = requests.post(f"{BASE_URL}/api/robot/start", timeout=DEFAULT_TIMEOUT_SEC)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def post_robot_pause() -> dict:
+    """POST /api/robot/pause -> {"result": "SUCCESS", "command": "MANUAL_PAUSE"}"""
+    resp = requests.post(f"{BASE_URL}/api/robot/pause", timeout=DEFAULT_TIMEOUT_SEC)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def post_robot_estop(task_id: Optional[str] = None) -> dict:
+    """POST /api/robot/emergency_stop -> {"result": "SUCCESS", "command": "EMERGENCY_STOP"}"""
+    resp = requests.post(
+        f"{BASE_URL}/api/robot/emergency_stop",
+        json={"task_id": task_id},
+        timeout=DEFAULT_TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ------------------------------------------------------------------
-# 로봇 직접 제어용 함수 (TODO)
+# 그리퍼 / MoveJ 제어용 함수 (TODO: backend 엔드포인트 미구현)
 # ------------------------------------------------------------------
-# routers/robot_router.py에는 현재 START/PAUSE/EMERGENCY STOP에 대응하는 실제
-# 엔드포인트가 없음 (router = APIRouter(prefix="/api/robot")만 등록된 빈 라우터).
-# 로봇팀과 커맨드 스펙을 확정한 뒤, 엔드포인트가 생기면 아래 형태로 추가하면 됨:
+# routers/robot_router.py에는 아직 그리퍼(open/close), MoveJ(관절각 일괄 전송)에
+# 대응하는 엔드포인트가 없음. 아래 두 함수는 backend 담당자가 엔드포인트를 추가할
+# 것을 전제로 미리 만들어둔 것이며, 엔드포인트가 없는 동안은 항상 404로 실패한다.
+# 호출부(dashboard.py)는 이 실패를 그대로 사용자에게 보여주고, 절대 로컬에서
+# 임의로 "성공" 처리하지 않는다.
 #
-# def post_robot_start() -> dict:
-#     resp = requests.post(f"{BASE_URL}/api/robot/start", timeout=DEFAULT_TIMEOUT_SEC)
-#     resp.raise_for_status()
-#     return resp.json()
-#
-# def post_robot_pause() -> dict:
-#     resp = requests.post(f"{BASE_URL}/api/robot/pause", timeout=DEFAULT_TIMEOUT_SEC)
-#     resp.raise_for_status()
-#     return resp.json()
-#
-# def post_robot_estop(task_id: Optional[str] = None) -> dict:
-#     resp = requests.post(f"{BASE_URL}/api/robot/estop", json={"task_id": task_id}, timeout=DEFAULT_TIMEOUT_SEC)
-#     resp.raise_for_status()
-#     return resp.json()
+# 엔드포인트가 추가되면 필요 시 URL/바디만 맞춰 조정하면 됨:
+#   POST /api/robot/gripper       {"action": "OPEN" | "CLOSE"}
+#   POST /api/robot/move_joint    {"J1": .., "J2": .., ..., "J6": ..}  (models.MoveJointRequest)
+def post_gripper_command(action: str) -> dict:
+    resp = requests.post(
+        f"{BASE_URL}/api/robot/gripper",
+        json={"action": action},
+        timeout=DEFAULT_TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def post_move_joint(joint_angles: dict) -> dict:
+    resp = requests.post(
+        f"{BASE_URL}/api/robot/move_joint",
+        json=joint_angles,
+        timeout=DEFAULT_TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 class WebSocketClient:

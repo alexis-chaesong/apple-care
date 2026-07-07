@@ -29,9 +29,14 @@ Apple Sorting Cycle
     ugly_box       -> b3 (경유점: way1)
     discard_box    -> b4 (경유점: way2)
 
+동작 순서 / HOME 관련:
+    - HOME은 사이클 전체에서 맨 처음(1회)과 맨 마지막(1회)에만 거침.
+      그 사이에는 매 사과마다 CAMERA -> (집기) -> CAMERA -> 경유점 -> 박스
+      -> 경유점 -> CAMERA 순으로만 돌고, 박스로 가기 전/집은 뒤에 HOME을
+      다시 거치지 않음.
+    - 집은 직후 별도의 퇴피 동작 없이 바로 CAMERA 위치로 이동함.
+
 안전 원칙:
-    - 집자마자 대각선으로 박스로 가지 않고, 반드시 HOME을 먼저 거침
-      (지름길로 바로 가면 테이블/카메라 장비와 충돌 위험이 있음).
     - 박스가 비어있어도 항상 힘제어(force_controlled_place)로 하강함.
       (힘제어 없는 고속 하강은 비상정지를 유발해서 제외함)
     - 이미 사과가 있다고 알려진 박스(현재 b1/normal_box)는, 사과 더미 꼭대기가 원래
@@ -39,8 +44,7 @@ Apple Sorting Cycle
       내려가지 않음. 대신 box_pos보다 EXISTING_APPLE_HOVER_CLEARANCE만큼 더 높은
       위치까지만 조심히(CAREFUL_APPROACH_VEL/ACC) movel로 접근하고, 그 지점부터
       force_controlled_place로 힘제어 하강을 시작해서 사과 더미와의 접촉도 힘으로 감지함.
-    - 박스에 놓은 뒤(성공/실패 무관)에는 매번 웨이포인트 -> 카메라 위치 -> 홈
-      순서로 복귀함.
+    - 박스에 놓은 뒤(성공/실패 무관)에는 매번 웨이포인트 -> 카메라 위치 순서로 복귀함.
 
 TODO:
     - DESTINATION_TO_BOX의 박스 배치(b1~b4가 실제로 어느 destination에 대응하는지)
@@ -64,7 +68,7 @@ from force_place import (
     CAREFUL_APPROACH_VEL, CAREFUL_APPROACH_ACC,
     EXISTING_APPLE_HOVER_CLEARANCE, EXISTING_APPLE_FORCE_THRESHOLD,
 )
-from openclose import gripper_open, gripper_close
+from openclose import gripper_open
 from status_bus import StatusBus
 
 ROBOT_ID = "dsr01"
@@ -90,25 +94,25 @@ def pick_apple(node, pick_pos):
     """
     사과를 집는 함수.
     1) 사과 위치로 이동
-    2) 그리퍼 닫기
-    3) 위쪽으로 퇴피 (테이블 위 다른 사과/장애물 안 걸고 가게)
+    2) 실시간 힘 감지로 그리퍼 닫기 (사과 크기에 맞춰 힘 자동 조절, grasp_force.py 참고)
+
+    집은 뒤 별도의 퇴피 동작은 하지 않음 - 호출하는 쪽(메인 루프)에서 바로
+    CAMERA 위치로 이동하는 것으로 대체함.
 
     Returns:
-        bool: 그리퍼 클로즈 명령이 정상적으로 전달됐는지 여부
+        bool: 파지 성공 여부 (손목 힘 센서로 접촉/파지가 확인됐는지)
     """
-    from DSR_ROBOT2 import movel, posx
+    from DSR_ROBOT2 import movel
+    from grasp_force import grasp_apple_with_force_feedback
 
     node.get_logger().info(f'사과 집기 위치로 이동: {pick_pos}')
     movel(pick_pos)
 
-    node.get_logger().info('그리퍼 닫기 (사과 집기)')
-    picked_ok = gripper_close()
+    node.get_logger().info('실시간 힘 감지로 그리퍼 닫기 (사과 크기에 맞춰 힘 자동 조절)')
+    applied_force, picked_ok = grasp_apple_with_force_feedback(node)
+    node.get_logger().info(f'최종 적용된 파지 힘: {applied_force} (파지 성공 여부: {picked_ok})')
     if not picked_ok:
-        node.get_logger().error('그리퍼 클로즈 실패 - 사과를 못 집었을 수 있습니다.')
-
-    px, py, pz, rx, ry, rz = pick_pos
-    retreat_pos = posx(px, py, pz + 50, rx, ry, rz)
-    movel(retreat_pos)
+        node.get_logger().error('파지 힘 감지 실패 - 사과를 못 집었을 수 있습니다.')
 
     return picked_ok
 
@@ -204,6 +208,16 @@ def main(args=None):
     node.get_logger().info("=== Apple sorting cycle start ===")
     status_bus.set_state("MOVING")
 
+    # HOME은 사이클 전체에서 맨 처음(여기)과 맨 마지막(루프를 빠져나간 뒤)에만 거침.
+    # 그 사이에는 CAMERA <-> WAY <-> BOX 사이만 순환함.
+    node.get_logger().info("Move to HOME (최초 1회)")
+    movej(HOME)
+    wait(0.3)
+
+    node.get_logger().info("Move to CAMERA position")
+    movel(CAMERA)
+    wait(0.3)
+
     while rclpy.ok():
         if emergency_stop.is_set():
             node.get_logger().error("EMERGENCY_STOP 상태 - 사이클을 중단합니다.")
@@ -234,31 +248,21 @@ def main(args=None):
 
         node.get_logger().info(f"--- 사과: fruit={fruit} destination={destination} -> {box_name} ---")
 
-        # 1) 사이클 시작은 항상 HOME에서
-        node.get_logger().info("Move to HOME")
-        movej(HOME)
-        wait(0.3)
-
-        # 2) 카메라 위치 경유 (비전이 붙기 전이라 지금은 확인용)
-        node.get_logger().info("Move to CAMERA position")
-        movel(CAMERA)
-        wait(0.3)
-
-        # 3) 사과 집기
+        # 1) 사과 집기 (이미 CAMERA 위치에 있는 상태 - 최초 진입 전 또는 이전
+        #    사이클의 마지막 단계에서 CAMERA로 이동해둔 상태에서 바로 이어짐)
         status_bus.set_motion("PICKING", fruit)
         picked_ok = pick_apple(node, pick_pos)
         status_bus.publish_gripper_status(picked_ok)
         if not picked_ok:
-            status_bus.publish_safety("ERR_PICK", f"{fruit} 그리퍼 클로즈 실패")
+            status_bus.publish_safety("ERR_PICK", f"{fruit} 파지(힘 감지) 실패")
         wait(0.3)
 
-        # 3.5) 집자마자 대각선으로 박스로 가지 않고, 반드시 HOME을 먼저 거침
-        #      (지름길로 가면 테이블/카메라 장비와 충돌 위험이 있음)
-        node.get_logger().info("Move to HOME before heading to box (안전 경유)")
-        movej(HOME)
+        # 2) 집은 직후 별도 퇴피 없이 바로 CAMERA 위치로 복귀
+        node.get_logger().info("Move to CAMERA position (집은 직후 바로 복귀)")
+        movel(CAMERA)
         wait(0.3)
 
-        # 4) 목적지 박스로 가기 전, 반드시 해당 박스의 경유점을 거침
+        # 3) 목적지 박스로 가기 전, 반드시 해당 박스의 경유점을 거침
         node.get_logger().info(f"Move to way point before {box_name}")
         movel(way_pos)
         wait(0.3)
@@ -309,7 +313,8 @@ def main(args=None):
             )
             status_bus.publish_safety("ERR_DROP", f"{box_name} 접촉 실패")
 
-        # 6) 성공/실패 무관하게 매번 웨이포인트 -> 카메라 -> 홈 순으로 복귀
+        # 4) 성공/실패 무관하게 매번 웨이포인트 -> 카메라 순으로 복귀 (홈은 거치지 않음).
+        #    다음 사이클은 이 CAMERA 위치에서 바로 이어서 사과를 집음.
         node.get_logger().info(f"Return to way point after {box_name}")
         movel(way_pos)
         wait(0.3)
@@ -318,13 +323,13 @@ def main(args=None):
         movel(CAMERA)
         wait(0.3)
 
-        node.get_logger().info("Return to HOME")
-        movej(HOME)
-        wait(0.3)
-
         status_bus.set_state("MOVING")
 
     node.get_logger().info("=== Apple sorting cycle done ===")
+
+    node.get_logger().info("Move to HOME (종료)")
+    movej(HOME)
+    wait(0.3)
 
     comm_node.destroy_node()
     node.destroy_node()
