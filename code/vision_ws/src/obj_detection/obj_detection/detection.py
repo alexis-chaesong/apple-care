@@ -38,17 +38,28 @@ DEBUG_IMAGE_PERIOD_SEC = 0.05
 # 뎁스 디버깅 창 이름
 DEPTH_DEBUG_WINDOW_NAME = "Depth Debug"
 
+# 디버그 오버레이 글자 크기/굵기 (이전 단일-박스 오버레이 스타일로 복원 - 다중 박스로
+# 바꾸면서 한 번 줄였던 걸 다시 키움)
+OVERLAY_FONT_SCALE = 0.6
+OVERLAY_FONT_THICKNESS = 2
+
 # "apple_normal"로 판정된 사과들의 실제 지름(mm, depth로 환산) 이동 평균을 이용해,
 # 그중 상대적으로 뚜렷하게 작은 사과를 "apple_small"로 재분류한다.
 NORMAL_SIZE_HISTORY_LEN = 75
-MIN_NORMAL_SIZE_SAMPLES = 5
-SMALL_APPLE_SIZE_RATIO = 0.5
+MIN_NORMAL_SIZE_SAMPLES = 1
+SMALL_APPLE_SIZE_RATIO = 0.8
 
 # YOLO가 작은 사과를 "손상(apple_damaged)"으로 잘못 인식하는 경우가 있어,
 # 이 라벨들에 한해서는 depth로 잰 실제 크기가 충분히 작으면 손상이 아니라
-# "작아서 그런 것"으로 보고 apple_small로 재분류한다.
+# "작아서 그런 것"으로 보고 재분류한다.
 # (apple_rotten은 색/질감 변화가 핵심 근거라 크기 오탐과 무관하므로 대상에서 제외)
+# 원래 YOLO가 뭐라고 했었는지(정상이었는지/손상으로 봤었는지) 구분이 되도록,
+# 재분류 결과도 하나의 "apple_small"이 아니라 원본 라벨별로 다르게 이름 붙인다.
 SIZE_OVERRIDE_LABELS = {"apple_normal", "apple_damaged"}
+SMALL_LABEL_MAP = {
+    "apple_normal": "apple_small_normal",
+    "apple_damaged": "apple_small_damaged",
+}
 
 
 class ObjectDetectionNode(Node):
@@ -67,6 +78,10 @@ class ObjectDetectionNode(Node):
             self.img_node.get_camera_intrinsic, "camera intrinsics"
         )
         self._normal_apple_sizes = deque(maxlen=NORMAL_SIZE_HISTORY_LEN)
+        # _normal_apple_sizes는 서비스 콜백 스레드(handle_get_status, 1초에 1개)와
+        # 뎁스 디버그 스레드(_draw_all_detections, 20Hz 다중 박스)가 동시에 쓰기/읽기
+        # 하므로 락으로 보호한다.
+        self._normal_sizes_lock = threading.Lock()
         # handle_get_status가 최근에 어떤 근거로 판정했는지(박스/뎁스 값/최종 라벨)를
         # 뎁스 디버그 창에 그려주기 위한 공유 상태. 서비스 콜백 스레드와 디버그 창
         # 스레드가 서로 다르므로 락으로 보호한다.
@@ -104,11 +119,22 @@ class ObjectDetectionNode(Node):
         self.get_logger().info("ObjectDetectionNode initialized.")
 
     def _publish_debug_image(self):
-        """최신 컬러 프레임에 YOLO 인식 결과를 그려서 디버그 토픽으로 퍼블리시."""
+        """최신 컬러 프레임에 depth 기반 판정 근거(높이차 통과 여부/실제 지름/
+        크기 재분류)를 그려서 디버그 토픽으로 퍼블리시.
+
+        예전엔 model.annotate_frame()으로 YOLO 원본 박스/라벨만 그려서 내보냈는데,
+        그러면 프론트(hmi_app)의 카메라 화면에는 depth 판정이나 apple_small_* 재분류가
+        전혀 안 보였다. 뎁스 디버그 창에서 쓰던 것과 동일한 `_draw_all_detections`를
+        컬러 프레임 위에 그대로 적용해서, 로컬 뎁스 창과 프론트 화면이 같은 정보를
+        보여주게 한다 (컬러/뎁스 프레임은 aligned_depth_to_color라 픽셀 좌표가 일치).
+        """
         frame = self.img_node.get_color_frame()
         if frame is None:
             return
-        annotated = self.model.annotate_frame(frame)
+        depth_frame = self.img_node.get_depth_frame()
+        annotated = frame.copy()
+        detections = self.model.get_all_detections(frame)
+        self._draw_all_detections(annotated, depth_frame, detections)
         msg = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
         self.debug_image_pub.publish(msg)
 
@@ -170,12 +196,6 @@ class ObjectDetectionNode(Node):
             box_color = (0, 255, 0) if depth_ok else (0, 0, 255)  # OK=초록, FAIL=빨강
             cv2.rectangle(colormap, (x1, y1), (x2, y2), box_color, 2)
 
-            rx1 = max(0, x1 - HEIGHT_DIFF_RING_PX)
-            ry1 = max(0, y1 - HEIGHT_DIFF_RING_PX)
-            rx2 = min(w, x2 + HEIGHT_DIFF_RING_PX)
-            ry2 = min(h, y2 + HEIGHT_DIFF_RING_PX)
-            cv2.rectangle(colormap, (rx1, ry1), (rx2, ry2), (0, 255, 255), 1)  # 주변 링(노랑)
-
             if not depth_ok:
                 caption = f"{label} {score:.2f} depth-FAIL"
             else:
@@ -183,24 +203,36 @@ class ObjectDetectionNode(Node):
                 preview_label = self._preview_size_label(label, diameter_mm, avg_diameter)
                 diameter_txt = f"{diameter_mm:.0f}mm" if diameter_mm is not None else "-"
                 if preview_label != label:
-                    caption = f"{label}->{preview_label} {diameter_txt}"
+                    # "원본라벨->재분류라벨" 화살표 표기 대신, 재분류된 결과(apple_small_*)만 표시
+                    caption = f"{preview_label} {score:.2f} {diameter_txt}"
                 else:
                     caption = f"{label} {score:.2f} {diameter_txt}"
+
+                # 실제 서비스는 1초에 "최고 confidence 박스 1개"만 봐서 평균 표본이
+                # 잘 안 쌓일 수 있으므로, 여기(매 프레임 다중 박스 스캔)서도 정상
+                # 사과로 확인된 것들을 같이 평균에 반영한다. 그래야 작은 사과가 한
+                # 번도 "최고 박스"로 안 뽑혀도 정상 사과들 평균은 계속 채워진다.
+                if (
+                    label == "apple_normal" and preview_label == "apple_normal"
+                    and score >= MIN_KNOWN_CONFIDENCE and diameter_mm is not None
+                ):
+                    self._add_normal_sample(diameter_mm)
+                    avg_diameter = self._avg_normal_diameter()
 
             text_y = y1 - 8 if y1 - 8 > 10 else y2 + 18
             cv2.putText(
                 colormap, caption, (x1, text_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3,
+                cv2.FONT_HERSHEY_SIMPLEX, OVERLAY_FONT_SCALE, (0, 0, 0), OVERLAY_FONT_THICKNESS + 2,
             )
             cv2.putText(
                 colormap, caption, (x1, text_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+                cv2.FONT_HERSHEY_SIMPLEX, OVERLAY_FONT_SCALE, (255, 255, 255), OVERLAY_FONT_THICKNESS,
             )
 
         if not detections:
             cv2.putText(
                 colormap, "no YOLO box in current frame", (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
+                cv2.FONT_HERSHEY_SIMPLEX, OVERLAY_FONT_SCALE, (255, 255, 255), OVERLAY_FONT_THICKNESS,
             )
 
     def _draw_last_service_summary(self, colormap, debug_info):
@@ -216,9 +248,13 @@ class ObjectDetectionNode(Node):
             )
         h = colormap.shape[0]
         y = h - 12
-        cv2.putText(colormap, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
         cv2.putText(
-            colormap, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1
+            colormap, text, (10, y),
+            cv2.FONT_HERSHEY_SIMPLEX, OVERLAY_FONT_SCALE, (0, 0, 0), OVERLAY_FONT_THICKNESS + 2,
+        )
+        cv2.putText(
+            colormap, text, (10, y),
+            cv2.FONT_HERSHEY_SIMPLEX, OVERLAY_FONT_SCALE, (255, 255, 255), OVERLAY_FONT_THICKNESS,
         )
 
     def handle_get_status(self, request, response):
@@ -377,26 +413,33 @@ class ObjectDetectionNode(Node):
             debug_info['avg_diameter_mm'] = avg_diameter
 
         final_label = self._preview_size_label(label, diameter_mm, avg_diameter)
-        if final_label == "apple_small" and label == "apple_damaged":
+        if final_label != label and label == "apple_damaged":
             self.get_logger().info(
                 f"YOLO judged 'apple_damaged' but size({diameter_mm:.1f}mm) is just "
-                f"small vs avg({avg_diameter:.1f}mm) -> overriding to apple_small"
+                f"small vs avg({avg_diameter:.1f}mm) -> overriding to {final_label}"
             )
 
         # apple_small로 재분류되지 않은, 즉 평균 크기 산정에 쓸만한 정상 크기만 누적.
         # apple_damaged로 판정된 것은(재분류 여부와 무관하게) 기준 크기 계산에서 제외한다.
         if final_label == "apple_normal":
-            self._normal_apple_sizes.append(diameter_mm)
+            self._add_normal_sample(diameter_mm)
         return final_label
+
+    def _add_normal_sample(self, diameter_mm):
+        with self._normal_sizes_lock:
+            self._normal_apple_sizes.append(diameter_mm)
 
     def _avg_normal_diameter(self):
         """지금까지 쌓인 정상 사과 지름(mm) 표본의 평균. 표본이 부족하면 None."""
-        if len(self._normal_apple_sizes) >= MIN_NORMAL_SIZE_SAMPLES:
-            return sum(self._normal_apple_sizes) / len(self._normal_apple_sizes)
+        with self._normal_sizes_lock:
+            samples = list(self._normal_apple_sizes)
+        if len(samples) >= MIN_NORMAL_SIZE_SAMPLES:
+            return sum(samples) / len(samples)
         return None
 
     def _preview_size_label(self, label, diameter_mm, avg_diameter):
-        """avg_diameter 대비 diameter_mm이 충분히 작으면 apple_small로 바꿔서 반환.
+        """avg_diameter 대비 diameter_mm이 충분히 작으면 원본 라벨에 맞는
+        apple_small_normal/apple_small_damaged로 바꿔서 반환.
 
         `_classify_size`의 실제 판정과 depth 디버그 창의 실시간 미리보기(여러 박스를
         한꺼번에 그릴 때)가 동일한 기준을 쓰도록 순수 계산만 분리한 함수. 상태(이동
@@ -405,7 +448,7 @@ class ObjectDetectionNode(Node):
         if label not in SIZE_OVERRIDE_LABELS or diameter_mm is None or avg_diameter is None:
             return label
         if diameter_mm < avg_diameter * SMALL_APPLE_SIZE_RATIO:
-            return "apple_small"
+            return SMALL_LABEL_MAP[label]
         return label
 
     def _real_world_diameter_mm(self, depth_frame, box):
