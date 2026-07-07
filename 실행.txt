@@ -1,3 +1,5 @@
+다음 순으로 하면 됨
+
 # 로봇 실행
 로봇패키지 소스
 roboton 아니면 bring_rg
@@ -6,8 +8,21 @@ roboton 아니면 bring_rg
 realsense
 
 # 백엔드, 프론드 단축어 - 앞에 경로 본인 상황에 맞게 수정할 것
+# 이건 .bashrc 맨 아래에 추가하면 됨
 alias bck='cd ~/apple-care/code/backend && uvicorn main:app --reload'
 alias fr='cd ~/apple-care/code/hmi_app && python3 view/dashboard.py'
+alias obd='ros2 run obj_detection object_detection'
+alias acr='ros2 run apple_care_robot box_sequence_test'
+
+# 넣기 전에 폴더 경로 확인하세요 꼭!!!!! - 본인 상황에 맞게 수정할 것
+# for p2
+function p2(){
+  cd ~/apple-care/code
+  echo "Switched proj2"
+  [ -f ~/apple-care/code/vision_ws/install/setup.bash ] && source ~/apple-care/code/vision_ws/install/setup.bash
+  [ -f ~/apple-care/code/robot_ws/install/setup.bash ] && source ~/apple-care/code/robot_ws/install/setup.bash
+}
+
 
 # vision_ws - 앞에 경로 본인 상황에 맞게 수정할 것
 cd ~/apple-care/code/vision_ws && colcon build --symlink-install
@@ -16,4 +31,6 @@ source install/setup.bash
 # robot_ws - 앞에 경로 본인 상황에 맞게 수정할 것
 cd ~/apple-care/code/robot_ws && colcon build --symlink-install
 source install/setup.bash
+
+# 하고 나서 p2 하면 둘다 소스 처리됨
 
