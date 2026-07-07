@@ -1,9 +1,0 @@
-source;share/apple_care_robot/hook/path.ps1
-source;share/apple_care_robot/hook/path.dsv
-source;share/apple_care_robot/hook/path.sh
-source;share/apple_care_robot/hook/pythonpath.ps1
-source;share/apple_care_robot/hook/pythonpath.dsv
-source;share/apple_care_robot/hook/pythonpath.sh
-source;share/apple_care_robot/hook/pythonscriptspath.ps1
-source;share/apple_care_robot/hook/pythonscriptspath.dsv
-source;share/apple_care_robot/hook/pythonscriptspath.sh
