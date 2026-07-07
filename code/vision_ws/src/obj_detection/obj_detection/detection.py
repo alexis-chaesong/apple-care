@@ -1,3 +1,29 @@
+"""
+detection.py
+=============
+카메라(RealSense D455)로 본 사과 1개의 상태를 판정해서 알려주는 ROS2 노드
+(object_detection_node). backend/vision_bridge.py가 이 노드의 get_apple_status
+서비스를 주기적으로 폴링해서 결과를 가져간다.
+
+판정 파이프라인 (handle_get_status 기준):
+    1) YOLO(AppleStatusModel)가 컬러 프레임에서 사과 후보 박스를 찾는다
+       (apple_normal / apple_rotten / apple_damaged 중 하나 + confidence).
+    2) 그 박스가 진짜 물체인지 depth로 재검증한다 - 박스 안쪽이 바로 바깥
+       배경보다 확실히 튀어나와 있어야 통과 (사진/그림자 등 오탐 방지).
+       -> _has_height_difference / _box_ring_depths
+    3) confidence가 너무 낮으면 "unknown", 박스 자체가 없으면 depth로 물체
+       유무만 봐서 "unknown"(뭔가 있음) 또는 "empty"(트레이 빔)로 답한다.
+    4) apple_normal/apple_damaged로 판정된 것들은 depth로 잰 실제 지름(mm)을
+       최근 정상 사과들의 평균과 비교해서, 확연히 작으면 손상이 아니라
+       "원래 작은 사과"로 보고 apple_small_normal/apple_small_damaged로
+       재분류한다. -> _classify_size / _real_world_diameter_mm
+
+디버깅용으로 별도 스레드 2개가 항상 돈다:
+    - img_node용 SingleThreadedExecutor 스레드: 카메라 토픽 구독을 계속 spin.
+    - _depth_debug_thread: depth 컬러맵 + 위 판정 근거를 그린 로컬 cv2 창.
+둘 다 서비스 콜백(느림, ~1초)과 별개 스레드/콜백그룹에서 돌아서 서로 막지 않는다.
+"""
+
 import threading
 import time
 from collections import deque
@@ -63,6 +89,12 @@ SMALL_LABEL_MAP = {
 
 
 class ObjectDetectionNode(Node):
+    """get_apple_status 서비스 + 디버그 이미지 퍼블리셔/창을 제공하는 메인 노드.
+
+    카메라 구독(ImgNode)은 별도 노드/스레드로 분리되어 있고, 이 노드는 그로부터
+    최신 프레임만 받아서 YOLO+depth 판정, 디버그 시각화, 서비스 응답을 담당한다.
+    """
+
     def __init__(self):
         super().__init__('object_detection_node')
         self.img_node = ImgNode()
@@ -304,6 +336,7 @@ class ObjectDetectionNode(Node):
             self._set_last_debug_info(debug_info)
             return response
 
+        # 박스 중심 픽셀 좌표 -> 그 지점의 depth로 3D 위치(카메라 좌표계) 계산
         cx, cy = map(int, [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
         position = self._compute_position(cx, cy)
 
@@ -498,6 +531,8 @@ class ObjectDetectionNode(Node):
         return data
 
     def _pixel_to_camera_coords(self, x, y, z):
+        # 표준 핀홀 카메라 역투영 공식: 픽셀(x,y)+depth(z) -> 카메라 좌표계 3D 점(mm).
+        # intrinsics(fx,fy=초점거리, ppx,ppy=주점)는 camera_info 토픽에서 옴.
         fx = self.intrinsics['fx']
         fy = self.intrinsics['fy']
         ppx = self.intrinsics['ppx']
@@ -522,6 +557,8 @@ def main(args=None):
     finally:
         executor.shutdown()
         node.img_executor.shutdown()
+        # 뎁스 디버그 창 전용 스레드도 정리해야 함 - 안 그러면 프로세스 종료 후에도
+        # cv2 창이 남거나 데몬 스레드가 좀비로 남을 수 있음
         node._stop_depth_debug.set()
         node._depth_debug_thread.join(timeout=1.0)
         node.img_node.destroy_node()
