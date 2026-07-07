@@ -63,3 +63,20 @@ def gripper_close() -> bool:
         print("[openclose] 그리퍼 클로즈 명령 전송 실패")
     time.sleep(MOTION_WAIT_SEC)
     return ok
+
+
+def gripper_close_with_force(force: int) -> bool:
+    """
+    지정한 힘(force, 0.1N 단위, 0~GRIPPER_MAX_FORCE)으로 그리퍼를 닫는 함수.
+
+    grasp_force.py의 실시간 힘 감지 파지에서, 사과 크기에 맞춰 힘을 단계적으로
+    올려가며 이 함수를 반복 호출함. Modbus 레지스터에 목표 force를 직접 쓰는
+    구조라 힘 값을 매번 절대값으로 바로 지정할 수 있음 (증감 명령을 여러 번
+    보내며 내부 상태를 따로 추적할 필요 없음).
+    """
+    force = max(0, min(GRIPPER_MAX_FORCE, force))
+    ok = _send_command(force, 0)
+    if not ok:
+        print(f"[openclose] 그리퍼 클로즈(힘={force}) 명령 전송 실패")
+    time.sleep(MOTION_WAIT_SEC)
+    return ok
