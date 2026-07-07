@@ -22,6 +22,7 @@ from config import settings
 from database import init_db
 from models import VisionFeatureIn
 from robot_bridge import bridge_manager
+from vision_bridge import vision_bridge_manager
 from connection_manager import connection_manager
 from services.decision_planner import decide
 from state.hitl_state_machine import hitl_state_machine
@@ -176,15 +177,14 @@ async def _vla_consumer_loop() -> None:
                 result = decide(raw_feature)
 
                 if result.action == "execute":
-                    # 즉시 실행 가능한 경우 - Motion Planner/ROS로 목적지 전달
-                    # (Motion Queue 연동은 로봇팀 담당자와 커맨드 포맷 합의 후 여기에 연결)
-                    bridge_manager.publish_command(
-                        command_type="SORT_DECISION",
-                        payload={
-                            "fruit_type": result.fruit_type,
-                            "destination": result.destination,
-                            "reason": result.reason,
-                        },
+                    # 즉시 실행 가능한 경우 - 로봇팀 motion_planner_node.py가 구독하는
+                    # /decision/result로 발행 (2단계 결정: /robot/command로 로봇팀을
+                    # 맞추게 하지 않고, 우리가 그쪽 스펙에 맞춰 발행하는 쪽으로 감)
+                    bridge_manager.publish_decision_result(
+                        fruit=result.fruit_type,
+                        destination=result.destination,
+                        pose=result.position,
+                        reason=result.reason,
                     )
                     # 실시간 모니터링을 위해 HMI에도 브로드캐스트
                     await connection_manager.broadcast({
@@ -235,6 +235,9 @@ async def lifespan(app: FastAPI):
         # 현재 FastAPI가 돌고 있는 비동기 이벤트 루프(current_loop)와 데이터 바구니(broadcast_queue)를 ROS 2 브리지에 넘겨주며 스레드를 실행함.
         # 이제 robot_bridge는 웹소켓이 뭔지 몰라도 이 큐에 데이터를 밀어 넣을 수 있게 됨
 
+        # 2-1) Vision Bridge 가동 (get_apple_status 서비스를 폴링해서 vision_queue에 적재)
+        vision_bridge_manager.start_bridge(current_loop, vision_queue)
+
         # 3) 백그라운드 큐 소비자 가동
         _consumer_task = asyncio.create_task(_queue_consumer_loop())
         # : 앞서 만든 소비자 루프(_queue_consumer_loop)를 백그라운드에서 비동기로 독립시켜 상시 구동
@@ -277,12 +280,15 @@ async def lifespan(app: FastAPI):
                 pass
 
         # 2) ROS spin 스레드 정리 + rclpy.shutdown
+        # vision_bridge_manager를 먼저 정리하고(rclpy.shutdown()을 호출하지 않으므로 순서 무관하지만
+        # 관례상 마지막에 전체 rclpy 컨텍스트를 내리는 bridge_manager보다 먼저 정리함), 그다음 bridge_manager.shutdown()
+        vision_bridge_manager.shutdown()
         bridge_manager.shutdown() # ROS 2 스레드 및 rclpy 안전 종료
         # 서버가 꺼질 때 백그라운드 태스크를 먼저 취소하고, ROS 2 스레드까지 안전하게 셧다운(bridge_manager.shutdown())하여 좀비 프로세스가 남는 것을 원천 차단
 
 app = FastAPI(
-    title="AutoDumpBot Backend API",
-    description="음식물 수거 로봇 자동화 시스템을 위한 백엔드 제어 및 이력 관리 API",
+    title="Apple-care",
+    description="apple-care API",
     version="1.0.0",
     lifespan=lifespan,
 )

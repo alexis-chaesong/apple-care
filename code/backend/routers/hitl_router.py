@@ -98,7 +98,7 @@ async def receive_policy_command(payload: PolicyCommandIn):
 
 
 class RobotResetRequest(BaseModel):
-    destination: Optional[str] = None  # normal_box/processing_box/discard_box/ugly_box 중 하나, 또는 생략
+    destination: Optional[str] = None  # normal_box/processing_box/discard_box/ugly_box 중 하나, 또는 생략 / processing_box -> 작은거
 
 
 @router.post("/robot/reset", summary="STUCK 상태 관리자 강제 복구")

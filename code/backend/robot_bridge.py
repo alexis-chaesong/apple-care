@@ -56,6 +56,13 @@ TOPIC_DEBUG_IMAGE = "/obj_detection/debug_image"
 # JPEG 인코딩 품질 (0~100). 웹소켓으로 계속 흘려보내야 하므로 화질보다 전송 크기를 우선함
 DEBUG_IMAGE_JPEG_QUALITY = 70
 
+# 로봇팀의 motion_planner_node.py가 실제로 구독하는 토픽 (/robot/command와는
+# 완전히 다른 스키마). publish_command()와 별개로 publish_decision_result()가
+# 전용으로 사용함 (2단계 조사 결과: motion_planner_node.py의 decision_callback()이
+# 현재 어떤 키도 검증하지 않는 완전 pass-through라서, fruit/destination/pose
+# 키 이름은 그쪽 docstring/주석에 적힌 미래 구현 계획에 맞춰둠)
+TOPIC_DECISION_RESULT = "/decision/result"
+
 SPIN_TIMEOUT_SEC = 0.1
 
 # 상단에 상태 매핑 테이블 추가 (msg가 없을 때를 위한 fallback)
@@ -100,6 +107,7 @@ class RobotBridgeManager:
         self._stop_event = threading.Event()
         # ★ 종료 제어의 핵심. 스레드 간에 "이제 그만 멈춰!"라는 신호를 안전하게 주고받기 위한 플래그(Flag) 객체
         self.command_pub = None  # publish_command에서 사용할 Publisher (start_bridge에서 생성)
+        self.decision_result_pub = None  # publish_decision_result에서 사용할 Publisher (start_bridge에서 생성)
 
     # ------------------------------------------------------------------
     def start_bridge(self, fastapi_loop: AbstractEventLoop, output_queue: Queue) -> None:
@@ -169,6 +177,9 @@ class RobotBridgeManager:
 
         #  명령 하달용 Publisher 생성
         self.command_pub = self.node.create_publisher(String, TOPIC_COMMAND, 10)
+
+        # 로봇팀 motion_planner_node.py용 Publisher (/decision/result)
+        self.decision_result_pub = self.node.create_publisher(String, TOPIC_DECISION_RESULT, 10)
 
         # 2. 기존과 동일하게 타이머도 유지 (헬스체크/디버깅 용도)
         # self.timer = self.node.create_timer(1.0, self.timer_callback)
@@ -281,6 +292,39 @@ class RobotBridgeManager:
 
         self.command_pub.publish(msg)
         print(f"[ROS2 /robot/command 발행]: {msg.data}", flush=True)
+
+    def publish_decision_result(
+        self,
+        fruit: str,
+        destination: str,
+        pose: list[float] | None,
+        **extra_fields,
+    ) -> None:
+        """
+        motion_planner_node.py가 구독하는 /decision/result 토픽으로 발행.
+        publish_command()와는 완전히 다른 스키마(command/task_id/mode_id/payload 구조가
+        아니라 fruit/destination/pose 평면 구조)이므로 별도 메서드로 분리함.
+
+        motion_planner_node.decision_callback()은 현재 어떤 키도 검증하지 않는
+        완전 pass-through라서(2단계 재확인 결과), pose=None이어도 그대로 통과되며
+        크래시하지 않음. 다만 그쪽 plan_motion_order()가 나중에 실제로 구현되면
+        pose를 실제로 써야 하므로, Vision이 좌표를 못 준 경우에도 굳이 값을
+        지어내지 않고 None을 그대로 흘려보냄.
+        """
+        if self.decision_result_pub is None or self.node is None:
+            logger.error(
+                "publish_decision_result 호출 실패: ROS Bridge가 아직 시작되지 않음. (fruit=%s)",
+                fruit,
+            )
+            return
+
+        body = {"fruit": fruit, "destination": destination, "pose": pose}
+        body.update(extra_fields)
+
+        msg = String(data=json.dumps(body, ensure_ascii=False))
+
+        self.decision_result_pub.publish(msg)
+        print(f"[ROS2 /decision/result 발행]: {msg.data}", flush=True)
 
     # ------------------------------------------------------------------
     # ROS 콜백 3종 (모두 ROS 스레드에서 실행됨)

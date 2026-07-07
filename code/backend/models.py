@@ -173,6 +173,12 @@ class DecisionResult(BaseModel):
 
     confidence: float
 
+    position: Optional[list[float]] = None
+    # [x, y, z]. VisionFeatureIn.center를 그대로 전달함 (Vision이 좌표를 못 준 경우 None).
+    # decide()가 이 값을 만들어내지 않고 vision.center를 그대로 흘려보내기만 함 -
+    # 로봇 쪽(Motion Planner)이 Pick pose를 계산하려면 반드시 필요한 정보라서,
+    # execute/ask_human 두 경로 모두에서 유실 없이 채워야 함
+
 
 class HoldCommand(BaseModel):
     # 백엔드가 robot_bridge.publish_command()를 통해 ROS로 내려보낼 HOLD/RESUME 명령 규격

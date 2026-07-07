@@ -1,5 +1,5 @@
 # open ai 호출
-# Claude Haiku API 호출 3종: 자연어→Policy JSON / Unknown 질문 문장 생성 / 사람 응답 해석
+# 자연어→Policy JSON / Unknown 질문 문장 생성 / 사람 응답 해석
 
 """
 llm_service.py
