@@ -8,7 +8,7 @@ ObjectDetectionNode에 섞어 쓰는(mixin) 디버그 시각화 로직.
 - YOLO 박스/미확인 블롭/최근 서비스 판정 결과를 화면에 그리는 함수들
 
 detection.py의 `class ObjectDetectionNode(..., DebugOverlayMixin, ...)`로
-섞여서 쓰인다. self.img_node, self.model, self.bridge, self.debug_image_pub,
+섞여서 쓰인다. self.img_node, self.model, self.debug_image_pub,
 self.background_distance_mm, self._stop_depth_debug, self._last_debug_info,
 self._debug_info_lock은 ObjectDetectionNode.__init__에서 준비되고,
 self._box_ring_depths/_real_world_diameter_mm/_find_all_unknown_blobs(depth_utils),
@@ -20,6 +20,7 @@ import time
 import cv2
 
 from obj_detection.depth_utils import HEIGHT_DIFF_MARGIN_MM
+from obj_detection.ros_image_utils import cv2_to_imgmsg
 
 # 디버그용 인식 결과 시각화 이미지 퍼블리시 주기(초)
 DEBUG_IMAGE_PERIOD_SEC = 0.05
@@ -53,7 +54,7 @@ class DebugOverlayMixin:
         annotated = frame.copy()
         detections = self.model.get_all_detections(frame)
         self._draw_all_detections(annotated, depth_frame, detections)
-        msg = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
+        msg = cv2_to_imgmsg(annotated, encoding='bgr8')
         self.debug_image_pub.publish(msg)
 
 

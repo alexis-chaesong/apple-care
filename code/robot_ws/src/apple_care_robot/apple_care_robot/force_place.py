@@ -140,7 +140,14 @@ def force_controlled_place(node, current_pos, force_threshold=FORCE_THRESHOLD):
 
             # 힘 임계값과 별개로, z 자체가 STALL_TIME_SEC 이상 거의 안 움직이면
             # (=뭔가에 막혀서 더 이상 못 내려가는 중) 접촉으로 간주하고 종료.
-            current_pos_now, _ = get_current_posx(DR_BASE)
+            # get_current_posx()는 컨트롤러가 순간적으로 빈 응답을 주면 내부적으로
+            # IndexError를 던지는 결함이 있음(Humble/Jazzy 브랜치 동일) - 이 tick의
+            # 스톨 체크만 건너뛰도록 방어.
+            try:
+                current_pos_now, _ = get_current_posx(DR_BASE)
+            except Exception as e:
+                node.get_logger().warn(f'get_current_posx 호출 실패 (이번 tick 스톨 체크 건너뜀): {e}')
+                current_pos_now = None
             if current_pos_now is not None:
                 current_z = current_pos_now[2]
                 now = time.time()

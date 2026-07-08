@@ -47,7 +47,6 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
 
 from apple_care_msgs.srv import SrvAppleStatus
 from obj_detection.realsense import ImgNode
@@ -110,7 +109,6 @@ class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayM
             callback_group=self.service_cb_group,
         )
 
-        self.bridge = CvBridge()
         self.debug_image_pub = self.create_publisher(Image, 'obj_detection/debug_image', 10)
         self.create_timer(
             DEBUG_IMAGE_PERIOD_SEC, self._publish_debug_image, callback_group=self.timer_cb_group
