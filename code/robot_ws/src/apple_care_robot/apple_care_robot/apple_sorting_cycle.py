@@ -69,6 +69,7 @@ import queue
 import threading
 
 import rclpy
+from rclpy.executors import SingleThreadedExecutor
 import DR_init
 from std_msgs.msg import String
 from apple_care_msgs.srv import SrvAppleStatus
@@ -127,20 +128,41 @@ def _depth_offset_for_condition(condition):
 def pick_apple(node, pick_pos):
     """
     사과를 집는 함수.
-    1) 사과 위치로 이동
-    2) 실시간 힘 감지로 그리퍼 닫기 (사과 크기에 맞춰 힘 자동 조절, grasp_force.py 참고)
+    1) (트레이 벽 근처면) 대각선 경유점을 먼저 거쳐서 벽과의 충돌 없이 접근
+    2) 사과 위치로 이동
+    3) 실시간 힘 감지로 그리퍼 닫기 (사과 크기에 맞춰 힘 자동 조절, grasp_force.py 참고)
 
     집은 뒤 별도의 퇴피 동작은 하지 않음 - 호출하는 쪽(메인 루프)에서 바로
     CAMERA 위치로 이동하는 것으로 대체함.
 
+    Args:
+        safe_movel_fn: main()이 만들어서 넘겨주는, comm_node/emergency_stop
+            이벤트가 이미 묶여있는 이동 함수 (safe_motion.safe_movel 참고).
+            비상정지가 걸리면 EmergencyStopError를 던지므로, 이 함수는 그 예외를
+            잡지 않고 그대로 호출부(메인 루프의 try/except)까지 전파해야 함.
+            None이면(기본값) box_sequence_test.py처럼 /robot/command 연동이 없는
+            호출부에서의 하위 호환을 위해 평범한(비상정지 감시 없는) movel을 씀.
+
     Returns:
         bool: 파지 성공 여부 (손목 힘 센서로 접촉/파지가 확인됐는지)
     """
-    from DSR_ROBOT2 import movel
     from apple_care_robot.grasp_force import grasp_apple_with_force_feedback
+    from apple_care_robot.wall_avoidance import compute_wall_aware_approach
+
+    if safe_movel_fn is None:
+        from DSR_ROBOT2 import movel as safe_movel_fn
+    from DSR_ROBOT2 import posx
+
+    # pick_pos가 트레이 벽에 가까우면(wall_avoidance.py 참고) 벽 반대쪽에서
+    # 비스듬히 내려가는 경유점을 먼저 거침 - 벽에서 멀면 hover_pos는 None이라
+    # 기존과 동일하게 바로 pick_pos로 감.
+    hover_pos, pick_pos = compute_wall_aware_approach(pick_pos, posx)
+    if hover_pos is not None:
+        node.get_logger().info(f'사과가 트레이 벽 근처로 판단되어 대각선 경유점을 먼저 거칩니다: {hover_pos}')
+        safe_movel_fn(hover_pos)
 
     node.get_logger().info(f'사과 집기 위치로 이동: {pick_pos}')
-    movel(pick_pos)
+    safe_movel_fn(pick_pos)
 
     node.get_logger().info('실시간 힘 감지로 그리퍼 닫기 (사과 크기에 맞춰 힘 자동 조절)')
     applied_force, picked_ok = grasp_apple_with_force_feedback(node)
@@ -169,6 +191,7 @@ def main(args=None):
     from DSR_ROBOT2 import (
         movel, movej, posx, posj, wait,
         set_velx, set_accx, set_velj, set_accj, get_current_posx,
+        amovel, amovej, check_motion,
     )
 
     # 좌표 정의
@@ -238,6 +261,38 @@ def main(args=None):
     decision_queue: "queue.Queue[dict]" = queue.Queue()
     started = threading.Event()
     emergency_stop = threading.Event()
+    estop_tracker = EstopRecoveryTracker()
+
+    # ------------------------------------------------------------------
+    # 비상정지 감시가 걸린 이동 함수 (safe_motion.py 참고).
+    # movel/movej 대신 이걸 쓰면, 이동 도중에는 10ms마다 emergency_stop을
+    # 확인하다가 걸리면 실제로 로봇을 멈추고(motion/move_stop) EmergencyStopError를
+    # 던짐 - 그 예외는 아래 while 루프의 try/except가 잡아서 복구로 넘어감.
+    #
+    # comm_node를 넘기는 이유: motion/move_stop 서비스 클라이언트는 DSR 제어용
+    # 메인 node가 아니라, 이미 별도 스레드에서 spin 중인 comm_node에서 만들어야
+    # 함(메인 node를 여기서 또 spin하면 충돌 위험 - 위 comm_node 분리 이유 참고).
+    # ------------------------------------------------------------------
+    def do_safe_movel(target, vel=None, acc=None, ref=None):
+        safe_movel(
+            comm_node, target, emergency_stop,
+            amovel=amovel, check_motion=check_motion, wait=wait,
+            vel=vel, acc=acc, ref=ref,
+        )
+
+    def do_safe_movej(target, vel=None, acc=None):
+        safe_movej(
+            comm_node, target, emergency_stop,
+            amovej=amovej, check_motion=check_motion, wait=wait,
+            vel=vel, acc=acc,
+        )
+
+    def recover_from_estop_if_needed() -> bool:
+        return check_and_recover(
+            node, status_bus, estop_tracker, emergency_stop,
+            movel=movel, gripper_open=gripper_open,
+            home_pos=HOME, camera_pos=CAMERA,
+        )
 
     def decision_result_callback(msg: String) -> None:
         try:
@@ -293,11 +348,11 @@ def main(args=None):
     # HOME은 사이클 전체에서 맨 처음(여기)과 맨 마지막(루프를 빠져나간 뒤)에만 거침.
     # 그 사이에는 CAMERA <-> WAY <-> BOX 사이만 순환함.
     node.get_logger().info("Move to HOME (최초 1회)")
-    movej(HOME)
+    do_safe_movej(HOME)
     wait(0.3)
 
     node.get_logger().info("Move to CAMERA position")
-    movel(CAMERA)
+    do_safe_movel(CAMERA)
     wait(0.3)
 
     # CAMERA 위치에 도착 + 그리퍼가 비어있는 이 시점부터가 백엔드 입장에서
@@ -309,10 +364,10 @@ def main(args=None):
     status_bus.set_state("READY")
 
     while rclpy.ok():
-        if emergency_stop.is_set():
-            node.get_logger().error("EMERGENCY_STOP 상태 - 사이클을 중단합니다.")
-            status_bus.set_state("ERROR", "emergency_stop")
-            break
+        # 사과 사이사이(대기 중)에 비상정지가 걸린 경우 - 지금은 진행 중인 이동이
+        # 없어서 아래 try/except(이동 도중 감지용)로는 못 잡으므로 별도로 확인.
+        if recover_from_estop_if_needed():
+            continue
 
         try:
             decision = decision_queue.get(timeout=1.0)
@@ -425,46 +480,82 @@ def main(args=None):
             )
             movel(safe_hover_pos, vel=CAREFUL_APPROACH_VEL, acc=CAREFUL_APPROACH_ACC)
             wait(0.3)
-            contact_ok = force_controlled_place(
-                node, safe_hover_pos, force_threshold=EXISTING_APPLE_FORCE_THRESHOLD
-            )
-        else:
-            node.get_logger().info(f"Move to {box_name} (hover above box)")
-            movel(box_pos)
-            wait(0.3)
-            contact_ok = force_controlled_place(node, box_pos)
 
-        if contact_ok:
-            node.get_logger().info(f"Apple contact confirmed at {box_name}. Opening gripper.")
-            opened_ok = gripper_open()
-            status_bus.publish_gripper_status(not opened_ok)
-            if not opened_ok:
-                node.get_logger().error(
-                    f"{box_name}: 그리퍼 오픈 실패 - 그립을 유지한 채로 복귀합니다."
+            # 2) 집은 직후 별도 퇴피 없이 바로 CAMERA 위치로 복귀
+            node.get_logger().info("Move to CAMERA position (집은 직후 바로 복귀)")
+            do_safe_movel(CAMERA)
+            wait(0.3)
+
+            # 3) 목적지 박스로 가기 전, 반드시 해당 박스의 경유점을 거침
+            node.get_logger().info(f"Move to way point before {box_name}")
+            do_safe_movel(way_pos)
+            wait(0.3)
+
+            status_bus.set_motion("PLACING", box_name)
+
+            if has_existing_apple:
+                # 이미 사과가 있으면 사과 더미 꼭대기가 원래 hover 좌표(box_pos)보다
+                # 높이 나와 있을 수 있어, box_pos까지 블라인드로 내려가면 힘제어가
+                # 걸리기도 전에 부딪힐 수 있음. 그래서 box_pos보다 더 높은 위치까지만
+                # 조심히 movel로 접근하고, 그 지점부터 힘제어로 하강을 시작함.
+                hx, hy, hz, hrx, hry, hrz = box_pos
+                safe_hover_pos = posx(hx, hy, hz + EXISTING_APPLE_HOVER_CLEARANCE, hrx, hry, hrz)
+                node.get_logger().info(
+                    f"{box_name}: 이미 사과가 있다고 가정 - 원래 hover보다 "
+                    f"{EXISTING_APPLE_HOVER_CLEARANCE}mm 위에서부터 조심히 접근합니다."
                 )
-                status_bus.publish_safety("ERR_DROP", f"{box_name} 그리퍼 오픈 실패")
+                do_safe_movel(safe_hover_pos, vel=CAREFUL_APPROACH_VEL, acc=CAREFUL_APPROACH_ACC)
+                wait(0.3)
+                contact_ok = force_controlled_place(
+                    node, safe_hover_pos, force_threshold=EXISTING_APPLE_FORCE_THRESHOLD,
+                    emergency_stop_event=emergency_stop, stop_node=comm_node,
+                )
+            else:
+                node.get_logger().info(f"Move to {box_name} (hover above box)")
+                do_safe_movel(box_pos)
+                wait(0.3)
+                contact_ok = force_controlled_place(
+                    node, box_pos,
+                    emergency_stop_event=emergency_stop, stop_node=comm_node,
+                )
+
+            if contact_ok:
+                node.get_logger().info(f"Apple contact confirmed at {box_name}. Opening gripper.")
+                opened_ok = gripper_open()
+                status_bus.publish_gripper_status(not opened_ok)
+                if not opened_ok:
+                    node.get_logger().error(
+                        f"{box_name}: 그리퍼 오픈 실패 - 그립을 유지한 채로 복귀합니다."
+                    )
+                    status_bus.publish_safety("ERR_DROP", f"{box_name} 그리퍼 오픈 실패")
+                else:
+                    # 실제로 박스에 내려놨으므로 이제 잡고 있지 않은 상태로 리셋
+                    # (그리퍼 오픈이 실패했으면 여전히 쥐고 있을 수 있으므로 리셋하지 않음)
+                    estop_tracker.mark_placed()
+                wait(0.3)
+
+                retreat_x, retreat_y, retreat_z, rx, ry, rz = box_pos
+                retreat_pos = posx(retreat_x, retreat_y, retreat_z + 50, rx, ry, rz)
+                do_safe_movel(retreat_pos)
+                wait(0.2)
+            else:
+                node.get_logger().error(
+                    f"{box_name}에서 접촉 실패 - 그립 유지한 채로 원위치 복귀. "
+                    f"이 사과는 놓지 못한 상태로 다음 단계 진행됨."
+                )
+                status_bus.publish_safety("ERR_DROP", f"{box_name} 접촉 실패")
+
+            # 4) 성공/실패 무관하게 매번 웨이포인트 -> 카메라 순으로 복귀 (홈은 거치지 않음).
+            #    다음 사이클은 이 CAMERA 위치에서 바로 이어서 사과를 집음.
+            node.get_logger().info(f"Return to way point after {box_name}")
+            do_safe_movel(way_pos)
             wait(0.3)
 
-            retreat_x, retreat_y, retreat_z, rx, ry, rz = box_pos
-            retreat_pos = posx(retreat_x, retreat_y, retreat_z + 50, rx, ry, rz)
-            movel(retreat_pos)
-            wait(0.2)
-        else:
-            node.get_logger().error(
-                f"{box_name}에서 접촉 실패 - 그립 유지한 채로 원위치 복귀. "
-                f"이 사과는 놓지 못한 상태로 다음 단계 진행됨."
-            )
-            status_bus.publish_safety("ERR_DROP", f"{box_name} 접촉 실패")
+            node.get_logger().info("Return to CAMERA position")
+            do_safe_movel(CAMERA)
+            wait(0.3)
 
-        # 4) 성공/실패 무관하게 매번 웨이포인트 -> 카메라 순으로 복귀 (홈은 거치지 않음).
-        #    다음 사이클은 이 CAMERA 위치에서 바로 이어서 사과를 집음.
-        node.get_logger().info(f"Return to way point after {box_name}")
-        movel(way_pos)
-        wait(0.3)
-
-        node.get_logger().info("Return to CAMERA position")
-        movel(CAMERA)
-        wait(0.3)
+            status_bus.set_state("MOVING")
 
         # CAMERA 위치 도착 + 그리퍼는 이미 위에서 열림(gripper_open()) -> 다음 사과를
         # 볼 준비가 된 상태이므로 READY로 되돌림 (예전엔 여기서 계속 "MOVING"으로
@@ -474,7 +565,7 @@ def main(args=None):
     node.get_logger().info("=== Apple sorting cycle done ===")
 
     node.get_logger().info("Move to HOME (종료)")
-    movej(HOME)
+    do_safe_movej(HOME)
     wait(0.3)
 
     comm_executor.shutdown()
