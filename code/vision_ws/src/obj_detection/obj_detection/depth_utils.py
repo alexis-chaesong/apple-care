@@ -34,6 +34,17 @@ BACKGROUND_DISTANCE_MM = 500
 PRESENCE_MARGIN_MM = 10
 MIN_PRESENCE_PIXELS = 500
 
+# 배경 캘리브레이션(self.background_depth_map)은 트레이를 내려다보는 CAMERA
+# 자세 한 번에만 찍힌다 (detection.py의 ObjectDetectionNode.__init__ 참고). 그런데
+# box_sequence_test.py의 detect_box_occupancy()처럼 로봇이 완전히 다른 자세(박스를
+# 내려다보는 way_pos)에서 get_apple_status를 호출하면, 그 시점의 depth 프레임은
+# 캘리브레이션 때와 아예 다른 장면이라 거의 모든 픽셀이 "배경과 다름"으로 잡혀서
+# 박스 테두리/바닥 전체가 하나의 거대한 덩어리로 "물체 있음"(unknown)으로
+# 오인식되는 문제가 있었다. 실제 사과 덩어리는 화면의 일부만 차지하므로, 프레임
+# 면적의 이 비율을 넘는 거대한 덩어리는 "캘리브레이션 시점과 다른 장면을 보고
+# 있다"는 신호로 보고 물체 후보에서 제외한다.
+MAX_PRESENCE_FRACTION = 0.3
+
 # 배경 캘리브레이션에 쓸 depth 프레임을 이 시간(초) 동안 모아서 픽셀별 median을
 # 계산한다 (한 프레임의 일시적 노이즈/반사로 인한 무효 픽셀에 강해지도록).
 BACKGROUND_CALIBRATION_DURATION_SEC = 1.5
@@ -131,10 +142,17 @@ class DepthAnalysisMixin:
             # label 0은 배경 - 튀어나온 덩어리가 하나도 없음
             return []
 
+        max_area = MAX_PRESENCE_FRACTION * (mask.shape[0] * mask.shape[1])
+
         blobs = []
         for label in range(1, num_labels):
             area = int(stats[label, cv2.CC_STAT_AREA])
             if area < MIN_PRESENCE_PIXELS:
+                continue
+            if area > max_area:
+                # 사과 한 개 크기를 훨씬 넘어서는 거대한 덩어리 - 배경 캘리브레이션
+                # 시점과 다른 장면을 보고 있다는 신호(카메라 자세가 바뀜 등)일
+                # 가능성이 높으므로 물체 후보에서 제외한다 (MAX_PRESENCE_FRACTION 참고).
                 continue
 
             x = int(stats[label, cv2.CC_STAT_LEFT])
