@@ -34,10 +34,10 @@ Apple Sorting Cycle
     이 스크립트는 이제 정해진 개수만 처리하고 끝나는 게 아니라, /decision/result가
     들어오는 대로 계속 처리하는 상시 서비스 루프로 동작함 (EMERGENCY_STOP 전까지).
 
-박스 매핑 (destination -> 실제 박스, TODO: 실제 배치와 일치하는지 반드시 확인 필요):
-    normal_box     -> b1 (경유점: way1)
-    processing_box -> b2 (경유점: way1)
-    ugly_box       -> b3 (경유점: way1)
+박스 매핑 (destination -> 실제 박스, 실제 배치로 확정됨):
+    processing_box -> b1 (경유점: way1)
+    ugly_box       -> b2 (경유점: way1)
+    normal_box     -> b3 (경유점: way1)
     discard_box    -> b4 (경유점: way2)
 
 동작 순서 / HOME 관련:
@@ -50,7 +50,7 @@ Apple Sorting Cycle
 안전 원칙:
     - 박스가 비어있어도 항상 힘제어(force_controlled_place)로 하강함.
       (힘제어 없는 고속 하강은 비상정지를 유발해서 제외함)
-    - 이미 사과가 있다고 알려진 박스(현재 b1/normal_box)는, 사과 더미 꼭대기가 원래
+    - 이미 사과가 있다고 알려진 박스(현재 b1/processing_box)는, 사과 더미 꼭대기가 원래
       hover 좌표(box_pos)보다 높이 나와 있을 수 있어서 box_pos까지 블라인드로
       내려가지 않음. 대신 box_pos보다 EXISTING_APPLE_HOVER_CLEARANCE만큼 더 높은
       위치까지만 조심히(CAREFUL_APPROACH_VEL/ACC) movel로 접근하고, 그 지점부터
@@ -58,8 +58,6 @@ Apple Sorting Cycle
     - 박스에 놓은 뒤(성공/실패 무관)에는 매번 웨이포인트 -> 카메라 위치 순서로 복귀함.
 
 TODO:
-    - DESTINATION_TO_BOX의 박스 배치(b1~b4가 실제로 어느 destination에 대응하는지)
-      확인 필요 - 지금은 임시로 위 순서대로 매핑해둠.
     - DESTINATION_TO_BOX의 has_existing_apple 플래그: 카메라가 박스 내부를 보고
       "이미 사과가 있는지" 판단한 결과로 교체 (지금은 b1만 하드코딩으로 True)
     - pose가 없을 때 쓰는 FALLBACK_PICK_POS_XYZ / DEFAULT_PICK_ORIENTATION:
@@ -162,11 +160,12 @@ def main(args=None):
     B4 = posx(786.27, 185.37, 36.23, 8.77, 158.32, 91.18)
 
     # destination -> (박스 이름, 박스 좌표, 경유점, 기존 사과 존재 여부)
+    # 실제 물리 배치 확정: b1=가공용, b2=못난이, b3=정상, b4=폐기
     global DESTINATION_TO_BOX
     DESTINATION_TO_BOX = {
-        "normal_box":     ("b1", B1, WAY1, True),   # 이미 사과가 있다고 가정 -> hover 진입을 조심히
-        "processing_box": ("b2", B2, WAY1, False),
-        "ugly_box":       ("b3", B3, WAY1, False),
+        "processing_box": ("b1", B1, WAY1, True),   # 이미 사과가 있다고 가정 -> hover 진입을 조심히
+        "ugly_box":       ("b2", B2, WAY1, False),
+        "normal_box":     ("b3", B3, WAY1, False),
         "discard_box":    ("b4", B4, WAY2, False),
     }
 
@@ -233,6 +232,14 @@ def main(args=None):
     movel(CAMERA)
     wait(0.3)
 
+    # CAMERA 위치에 도착 + 그리퍼가 비어있는 이 시점부터가 백엔드 입장에서
+    # "지금 보이는 게 진짜 새 사과"라고 신뢰할 수 있는 유일한 구간임.
+    # /robot/process_state="READY"를 여기서 명시적으로 발행해야, 백엔드의
+    # _vla_consumer_loop가 이 시점에 들어온 Vision 감지만 판단(자동 실행/사람에게
+    # 질문)하고, 그 외 구간(집기/이동/내려놓기 중)에 카메라가 우연히 잡는 잔상은
+    # 무시하도록 게이팅할 수 있음.
+    status_bus.set_state("READY")
+
     while rclpy.ok():
         if emergency_stop.is_set():
             node.get_logger().error("EMERGENCY_STOP 상태 - 사이클을 중단합니다.")
@@ -272,6 +279,10 @@ def main(args=None):
 
         # 1) 사과 집기 (이미 CAMERA 위치에 있는 상태 - 최초 진입 전 또는 이전
         #    사이클의 마지막 단계에서 CAMERA로 이동해둔 상태에서 바로 이어짐)
+        # 이 decision을 처리하는 순간부터 그리퍼가 다시 CAMERA로 돌아와 열릴 때까지는
+        # "새 사과를 보는 중"이 아니므로 READY를 벗어남을 명시적으로 알림
+        # (백엔드가 이 값이 READY가 아닐 때는 Vision 감지를 무시하도록 게이팅함)
+        status_bus.set_state("MOVING")
         status_bus.set_motion("PICKING", fruit)
         picked_ok = pick_apple(node, pick_pos)
         status_bus.publish_gripper_status(picked_ok)
@@ -345,7 +356,10 @@ def main(args=None):
         movel(CAMERA)
         wait(0.3)
 
-        status_bus.set_state("MOVING")
+        # CAMERA 위치 도착 + 그리퍼는 이미 위에서 열림(gripper_open()) -> 다음 사과를
+        # 볼 준비가 된 상태이므로 READY로 되돌림 (예전엔 여기서 계속 "MOVING"으로
+        # 남아있어서 백엔드가 "카메라 위치에서 대기 중"과 "이동 중"을 구분 못했음)
+        status_bus.set_state("READY")
 
     node.get_logger().info("=== Apple sorting cycle done ===")
 

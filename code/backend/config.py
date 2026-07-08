@@ -225,18 +225,40 @@ class Settings:
     # 기본값으로 가져옴. 마이크 장치가 바뀌면 pyaudio.PyAudio().get_device_info_by_index(i)로
     # 재확인 후 .env의 WAKEWORD_MIC_DEVICE_INDEX만 수정하면 됨
 
+    wakeword_mic_native_rate: int = field(
+        default_factory=lambda: int(os.getenv("WAKEWORD_MIC_NATIVE_RATE", "48000"))
+    )
+    # 웨이크워드 마이크(pyaudio)가 실제로 지원하는 캡처 샘플레이트. 이 프로젝트를
+    # 실행하는 사람마다(Jazzy+Python 3.12 환경, Humble+Python 3.10/3.11 환경 등)
+    # 노트북/마이크 하드웨어가 다를 수 있어 48000으로 고정하지 않고 .env의
+    # WAKEWORD_MIC_NATIVE_RATE로 오버라이드 가능하게 함. wakeup_listener.py가 이 값을
+    # 기준으로 openwakeword가 요구하는 16kHz 프레임 크기와 리샘플 비율을 자동 계산함
+    # (48kHz 고정 가정이었던 예전 코드는 다른 샘플레이트 마이크에서 깨짐)
+
     stt_mic_device_index: Optional[int] = field(
         default_factory=lambda: (
             int(os.environ["STT_MIC_DEVICE_INDEX"])
             if os.getenv("STT_MIC_DEVICE_INDEX") is not None
-            else None
+            # 명시 안 하면 wakeword_mic_device_index(기본 4)와 같은 물리 마이크를
+            # 기본값으로 씀. python310_to_312_voice_changes.md 11번 항목에서 확인된
+            # 실제 하드웨어 결론: sounddevice 기본 장치(7)는 이 마이크가 아니었고,
+            # 장치 4가 진짜 마이크였음
+            else int(os.getenv("WAKEWORD_MIC_DEVICE_INDEX", "4"))
         )
     )
     # stt_service.py(sounddevice)가 쓰는 마이크 장치. wakeword_mic_device_index는
     # pyaudio(ALSA hw 인덱스) 기준이고 이건 sounddevice(PortAudio) 기준이라 번호 체계가
-    # 다를 수 있음 - scripts/check_mic_level.py로 확인 후 .env의 STT_MIC_DEVICE_INDEX로
-    # 지정. 값이 없으면(None) sounddevice의 시스템 기본 입력 장치를 그대로 사용함
-    # (기존 동작과 동일 - 기본 장치가 맞다면 아무것도 설정할 필요 없음)
+    # 다를 수 있으나, 지금까지 확인된 실제 하드웨어에서는 둘 다 index 4로 동일함
+    # (scripts/check_mic_level.py로 재확인 가능)
+
+    stt_mic_native_rate: int = field(
+        default_factory=lambda: int(os.getenv("STT_MIC_NATIVE_RATE", "48000"))
+    )
+    # 마이크가 실제로 지원하는 캡처 샘플레이트. python310_to_312_voice_changes.md에서
+    # 확인된 대로 장치 4는 16kHz 직접 캡처를 지원하지 않고 48kHz만 지원함 - 이 값으로
+    # 먼저 녹음한 뒤, stt_sample_rate(Whisper용 16kHz)로 소프트웨어 리샘플링함.
+    # 16kHz를 직접 요청하면 ALSA가 조용히 무음/깨진 신호를 반환하는 문제가 있었음
+    # (Whisper가 반복해서 "you"로만 인식했던 원인)
 
 # 모듈 전역에서 공유하는 단일 설정 인스턴스.
 # 다른 파일에서는 `from config import settings` 로만 가져다 사용

@@ -69,6 +69,10 @@ class HITLSession:
     fruit_type: str
     condition: str
     vision_confidence: float
+    position: Optional[list[float]] = None
+    # Vision이 이 사과를 감지했을 때의 카메라 좌표 (VisionFeatureIn.center 그대로).
+    # 답변이 해석되면 이 좌표를 그대로 실어서 /decision/result로 발행해야
+    # 로봇 쪽(apple_sorting_cycle.py)이 실제로 이 사과를 집어서 옮길 수 있음.
     state: HITLState = HITLState.IDLE
     attempt: int = 0
     session_id: str = dc_field(default_factory=lambda: __import__("uuid").uuid4().hex[:8])
@@ -83,7 +87,7 @@ class HITLStateMachine:
     def __init__(self) -> None:
         self._current: Optional[HITLSession] = None
         self._answer_future: Optional[asyncio.Future] = None
-        self._pending: deque[tuple[str, str, float]] = deque()
+        self._pending: deque[tuple[str, str, float, Optional[list[float]]]] = deque()
         self._lock = asyncio.Lock()
         # _lock: _current와 _pending을 동시에 여러 코루틴이 건드리는 것을 방지.
         # (예: consumer loop가 새 ask_human을 넣는 동시에 세션 종료 처리가 겹치는 경우)
@@ -92,13 +96,22 @@ class HITLStateMachine:
     # 외부(consumer loop, decision_planner 호출부)에서 부르는 진입점
     # ------------------------------------------------------------------
     async def handle_ask_human(
-        self, fruit_type: str, condition: str, vision_confidence: float
+        self,
+        fruit_type: str,
+        condition: str,
+        vision_confidence: float,
+        position: Optional[list[float]] = None,
     ) -> None:
         """
         decision_planner.decide()가 action="ask_human"을 반환했을 때 호출.
         이미 세션이 진행 중이면 대기열에 쌓고, 아니면 즉시 세션을 시작.
         블로킹하지 않도록 백그라운드 task로 실행됨 (main.py의 consumer loop가
         HITL 대화가 끝날 때까지 다른 Vision 프레임 처리를 멈추지 않게 하기 위함).
+
+        position: DecisionResult.position(=Vision이 감지한 카메라 좌표)을 그대로
+        전달받아 세션에 보관함 - 답변이 해석된 뒤 이 좌표 없이 RESUME만 보내면
+        로봇이 실제로 어느 사과를 어디로 옮겨야 하는지 알 수 없어 아무 동작도
+        하지 않는 문제가 있었음 (아래 _ask_and_wait 참고).
         """
         async with self._lock:
             if self._current is not None:
@@ -106,12 +119,13 @@ class HITLStateMachine:
                     "HITL 세션 진행 중, 대기열에 추가: fruit=%s condition=%s",
                     fruit_type, condition,
                 )
-                self._pending.append((fruit_type, condition, vision_confidence))
+                self._pending.append((fruit_type, condition, vision_confidence, position))
                 return
             self._current = HITLSession(
                 fruit_type=fruit_type,
                 condition=condition,
                 vision_confidence=vision_confidence,
+                position=position,
             )
 
         asyncio.create_task(self._run_session())
@@ -166,10 +180,15 @@ class HITLStateMachine:
             )
             result_destination = updated["destination"]
 
-        bridge_manager.publish_command(
-            command_type="RESUME",
-            payload={"fruit_type": session.fruit_type, "destination": result_destination},
-        )
+        if result_destination is not None:
+            # 관리자가 destination을 지정한 경우에만 실제로 옮기게 함 (지정 안 하면
+            # 이 사과는 그냥 세션만 정리하고 로봇 판단에 맡기지 않음 - 아래 comment 참고)
+            bridge_manager.publish_decision_result(
+                fruit=session.fruit_type,
+                destination=result_destination,
+                pose=session.position,
+                reason="admin_force_reset",
+            )
         logger.warning(
             "관리자 강제 리셋 (session_id=%s): destination=%s",
             session.session_id, result_destination,
@@ -347,9 +366,17 @@ class HITLStateMachine:
             raw_answer=raw_answer,
             session_id=session.session_id,
         )
-        bridge_manager.publish_command(
-            command_type="RESUME",
-            payload={"fruit_type": session.fruit_type, "destination": destination},
+        # 로봇 쪽(apple_sorting_cycle.py)은 /robot/command의 RESUME을 실제로 처리하지
+        # 않고 경고 로그만 남기고 무시하도록 되어 있음 (아직 그 부분은 미구현). 로봇의
+        # decision_queue는 오직 /decision/result만 구독해서 pick&place를 실행하므로,
+        # 이 사과를 실제로 옮기게 하려면 "execute" 경로와 동일하게 반드시
+        # publish_decision_result()로 보내야 함 - publish_command(RESUME)만 보내면
+        # 정책은 저장되지만 로봇은 아무 동작도 하지 않는 버그가 있었음.
+        bridge_manager.publish_decision_result(
+            fruit=session.fruit_type,
+            destination=destination,
+            pose=session.position,
+            reason="human_feedback",
         )
         logger.info(
             "HITL 세션 완료 (session_id=%s): destination=%s confidence=%.2f",
@@ -395,9 +422,10 @@ class HITLStateMachine:
         async with self._lock:
             if not self._pending or self._current is not None:
                 return
-            fruit_type, condition, confidence = self._pending.popleft()
+            fruit_type, condition, confidence, position = self._pending.popleft()
             self._current = HITLSession(
-                fruit_type=fruit_type, condition=condition, vision_confidence=confidence
+                fruit_type=fruit_type, condition=condition, vision_confidence=confidence,
+                position=position,
             )
         asyncio.create_task(self._run_session())
 

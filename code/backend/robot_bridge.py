@@ -109,6 +109,23 @@ class RobotBridgeManager:
         self.command_pub = None  # publish_command에서 사용할 Publisher (start_bridge에서 생성)
         self.decision_result_pub = None  # publish_decision_result에서 사용할 Publisher (start_bridge에서 생성)
 
+        # 그리퍼가 지금 사과를 쥐고 있는지(True) 여부. main.py의 _vla_consumer_loop가
+        # 이 값을 보고, 로봇이 사과를 집어서 박스로 옮기는 중(그리퍼 닫힘)에는 그 사이
+        # 카메라에 잡히는 감지 결과(그리퍼/사과 잔상, 손 등)를 실제 새 사과로 오인해
+        # ask_human을 띄우지 않도록 걸러냄. apple_sorting_cycle.py의 상태 문자열은
+        # 사이클 시작 후 계속 "MOVING"으로만 남아있어(READY로 복귀 안 함) "카메라 위치에서
+        # 대기 중"과 "박스로 이동 중"을 구분 못하지만, 그리퍼 개폐 여부는 정확히
+        # "집어서 이동중"과 일치하는 신호라 이걸로 게이팅함.
+        self.gripper_grasped: bool = False
+
+        # /robot/process_state의 최신 원시(raw) 상태 문자열(예: "READY", "MOVING").
+        # apple_sorting_cycle.py가 CAMERA 위치에 도착해 다음 사과를 볼 준비가 됐을
+        # 때만 "READY"를 발행하도록 수정해뒀으므로, 이 값이 정확히 "READY"일 때만
+        # 카메라가 지금 보고 있는 게 신뢰할 수 있는 새 사과라는 뜻. main.py의
+        # _vla_consumer_loop가 이 값과 gripper_grasped를 함께 확인해서, 그 외
+        # 구간(집기/이동/내려놓기 중)에 잡히는 unknown bbox 등은 전부 무시함.
+        self.latest_process_state: str = "IDLE"
+
     # ------------------------------------------------------------------
     def start_bridge(self, fastapi_loop: AbstractEventLoop, output_queue: Queue) -> None:
         """
@@ -346,6 +363,7 @@ class RobotBridgeManager:
         print(f"[ROS2 /robot/process_state 수신]: {msg.data}", flush=True)
 
         state, message = _split_colon(msg.data)
+        self.latest_process_state = state
         status_text = message if message else STATE_KO_MAP.get(state, state)
 
         payload = {
@@ -391,6 +409,7 @@ class RobotBridgeManager:
 
     def _gripper_status_callback(self, msg) -> None:
         print(f"[ROS2 /gripper/status 수신]: {msg.data}", flush=True)
+        self.gripper_grasped = bool(msg.data)
         payload = {
             "type": "GRIPPER_STATUS",
             "grasped": msg.data,
