@@ -75,6 +75,13 @@ SPIN_TIMEOUT_SEC = 0.1
 # 1이면 예전 동작(즉시 리셋)과 같음.
 EMPTY_RESET_STREAK = 3
 
+# "unknown"(미확인 과일) 응답이 몇 번 연속으로 와야 실제로 ask_human으로 이어질
+# 자격을 주는지. YOLO 판정이 프레임마다 흔들리면 정상 사과도 한두 프레임은 "unknown"으로
+# 잘못 나올 수 있는데, 그때마다 바로 질문을 띄우면 안 됨 - 확실하게 분류된 상태(정상/작음/
+# 흠집/곰팡이 등)가 나오면 그게 우선이고, unknown은 가장 낮은 우선순위로 미뤄서 이 만큼
+# 연속으로 나와야만 진짜 미확인 물체로 인정함.
+UNKNOWN_CONFIRM_STREAK = 3
+
 # obj_detection/yolo.py의 CLASS_NAMES + detection.py가 붙이는 unknown/empty를 포함한
 # 전체 status 값 중, 실제 fruit_type/defect_type으로 명확히 매핑되는 값들만 여기 정의.
 # unknown/empty는 별도 분기로 처리함 (아래 _ros_response_to_vision_feature 참고)
@@ -177,6 +184,12 @@ class VisionBridgeManager:
         # 매번 바로 리셋하면 사실 같은 물체를 계속 "새로 감지됨"으로 취급해 ask_human이
         # 반복 발생(HITL 팝업 스팸)하므로 약간의 유예(hysteresis)를 둔다.
         self._empty_streak = 0
+
+        # "unknown" 응답이 연속으로 몇 번 나왔는지 카운트. UNKNOWN_CONFIRM_STREAK
+        # 미만이면 아직 큐에 안 넣고(=후순위로 미룸), 그 사이 확실한 분류(정상/작음/
+        # 흠집/곰팡이 등)가 한 번이라도 나오면 그게 우선권을 갖고 즉시 큐에 들어감
+        # (동시에 unknown 카운트도 리셋됨).
+        self._unknown_streak = 0
 
     # ------------------------------------------------------------------
     def start_bridge(self, fastapi_loop: AbstractEventLoop, output_queue: Queue) -> None:
@@ -281,8 +294,23 @@ class VisionBridgeManager:
                 if self._empty_streak >= EMPTY_RESET_STREAK:
                     self._last_status = None
                     self._last_position = None
+                    self._unknown_streak = 0
                 return
             self._empty_streak = 0
+
+            if response.status == "unknown":
+                # 확실한 분류가 하나도 안 나오고 계속 unknown만 나올 때만 진짜 미확인
+                # 물체로 인정함 (사용자 요구사항: "확실한 것부터 처리하고 unknown은
+                # 가장 후순위로"). 아직 확정 전이면 이번 폴링은 그냥 버리고 다음
+                # 폴링에서 다시 판단 - 그 사이 확실한 분류가 나오면 아래 else에서
+                # 즉시 우선 처리됨.
+                self._unknown_streak += 1
+                if self._unknown_streak < UNKNOWN_CONFIRM_STREAK:
+                    return
+            else:
+                # 확실한 분류(정상/작음/흠집/곰팡이 등) - unknown 카운트를 리셋해
+                # 다음에 unknown이 다시 나와도 처음부터 다시 세게 함
+                self._unknown_streak = 0
 
             position = list(response.position or [])
             if self._is_duplicate(response.status, position):
@@ -301,6 +329,19 @@ class VisionBridgeManager:
             # ROS2 콜백에서 처리 안 된 예외가 올라가면 노드 전체가 죽을 수 있으므로
             # 반드시 여기서 잡아서 로그만 남기고 이번 메시지는 버림
             logger.error("Vision 서비스 응답 처리 중 예외 발생, 메시지를 버림", exc_info=True)
+
+    def force_redetect(self) -> None:
+        """
+        직전에 큐에 넣은 (status, position) 디바운스 상태를 초기화.
+
+        services/voice_policy.py가 음성으로 새 정책을 등록했을 때 호출함 - 카메라에
+        아직 같은 사과가 그대로 있으면, 이 초기화가 없을 경우 다음 폴링에서도
+        "이미 처리한 것"으로 취급되어 재큐잉되지 않고, 방금 등록한 새 정책이 그
+        사과에는 절대 반영되지 않는 문제가 있었음.
+        """
+        self._last_status = None
+        self._last_position = None
+        self._unknown_streak = 0
 
     def _is_duplicate(self, status: str, position: list[float]) -> bool:
         """직전에 큐에 넣은 (status, position)과 실질적으로 같으면 True (같은 사과)."""

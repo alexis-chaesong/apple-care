@@ -25,7 +25,9 @@ from robot_bridge import bridge_manager
 from vision_bridge import vision_bridge_manager
 from connection_manager import connection_manager
 from services.decision_planner import decide
+from services.voice_policy import run_voice_policy_command
 from state.hitl_state_machine import hitl_state_machine
+from stt_tts.wakeup_listener import wakeup_listener
 from routers import robot_router, vla_router, hitl_router
 
 
@@ -173,6 +175,19 @@ async def _vla_consumer_loop() -> None:
         while True:
             raw_feature: VisionFeatureIn = await vision_queue.get()
 
+            # 로봇이 CAMERA 위치에서 다음 사과를 볼 준비가 된 상태(READY, 그리퍼도
+            # 비어있음)일 때만 판단함. apple_sorting_cycle.py는 집기/이동/내려놓기
+            # 중에는 "READY"가 아닌 다른 상태를 발행하도록 되어 있으므로, 그 구간에
+            # 카메라가 우연히 잡는 그리퍼/사과 잔상이나 unknown bbox는 여기서 전부
+            # 걸러짐 - 사용자 요구사항: "카메라 위치에서만 물체를 인식한 뒤에 물어봐야
+            # 하고, 다른 위치(이동 중)의 unknown은 무시하는 게 맞다".
+            if bridge_manager.gripper_grasped or bridge_manager.latest_process_state != "READY":
+                logger.debug(
+                    "카메라 위치(READY)가 아니라 Vision 판단 건너뜀: fruit_type=%s state=%s grasped=%s",
+                    raw_feature.fruit_type, bridge_manager.latest_process_state, bridge_manager.gripper_grasped,
+                )
+                continue
+
             try:
                 result = decide(raw_feature)
 
@@ -185,6 +200,9 @@ async def _vla_consumer_loop() -> None:
                         destination=result.destination,
                         pose=result.position,
                         reason=result.reason,
+                        condition=result.condition,
+                        # condition("small" 등)을 같이 보내야 로봇 쪽(apple_sorting_cycle.py)이
+                        # 작은 사과 전용 depth 보정(SMALL_APPLE_DEPTH_OFFSET_MM)을 적용할 수 있음
                     )
                     # 실시간 모니터링을 위해 HMI에도 브로드캐스트
                     await connection_manager.broadcast({
@@ -209,6 +227,7 @@ async def _vla_consumer_loop() -> None:
                         fruit_type=result.fruit_type,
                         condition=result.condition,
                         vision_confidence=result.confidence,
+                        position=result.position,
                     )
 
             except Exception:  # noqa: BLE001
@@ -252,6 +271,12 @@ async def lifespan(app: FastAPI):
         # request.app.state를 통해 큐에 접근할 수 있게 하기 위함 (순환 참조 방지)
         app.state.vision_queue = vision_queue
 
+        # 3-3. 웨이크워드 상시 대기 태스크 가동 (settings.voice_wakeword_enabled=false면
+        # wakeup_listener.start() 내부에서 즉시 반환하고 아무것도 하지 않음).
+        # 웨이크워드 감지 시 voice_policy.run_voice_policy_command()를 그대로 호출해서,
+        # HMI push-to-talk 버튼(hitl_router.py)과 동일한 로직을 공유함
+        wakeup_listener.start(run_voice_policy_command)
+
         print("lifespan startup finished")
 
         yield
@@ -280,6 +305,9 @@ async def lifespan(app: FastAPI):
                 await _vla_consumer_task
             except asyncio.CancelledError:
                 pass
+
+        # 1-2) 웨이크워드 대기 태스크 정리 (pyaudio 스트림/PyAudio 인스턴스 해제)
+        await wakeup_listener.stop()
 
         # 2) ROS spin 스레드 정리 + rclpy.shutdown
         # vision_bridge_manager를 먼저 정리하고(rclpy.shutdown()을 호출하지 않으므로 순서 무관하지만

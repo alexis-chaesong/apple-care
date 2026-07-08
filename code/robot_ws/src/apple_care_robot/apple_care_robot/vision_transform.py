@@ -49,6 +49,12 @@ DEPTH_OFFSET_MM = -80.0
 # 덜 내려가는 오프셋을 따로 둠 (camera_to_base의 depth_offset_mm 인자로 넘겨서 씀).
 SMALL_APPLE_DEPTH_OFFSET_MM = DEPTH_OFFSET_MM + 20.0
 
+# 미확인(unknown) 과일은 크기/모양을 전혀 모르는 상태라 일반 DEPTH_OFFSET_MM대로
+# 내려가면 트레이/받침대와 충돌할 위험이 있음. SMALL_APPLE_DEPTH_OFFSET_MM을
+# 그대로 재사용하지 않고, 나중에 실측으로 독립적으로 튜닝할 수 있도록 별도 상수로
+# 둠 (지금은 SMALL_APPLE_DEPTH_OFFSET_MM과 같은 값에서 시작).
+UNKNOWN_FRUIT_DEPTH_OFFSET_MM = DEPTH_OFFSET_MM + 20
+
 # 변환 후 z가 이 값보다 낮게 나오면(예: depth 잡음/오탐으로 비정상적으로 얕게
 # 나온 경우) 이 값으로 클램프해서 로봇이 테이블을 뚫고 내려가는 것을 방지.
 MIN_Z_MM = 2.0

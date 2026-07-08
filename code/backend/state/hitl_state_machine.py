@@ -69,6 +69,10 @@ class HITLSession:
     fruit_type: str
     condition: str
     vision_confidence: float
+    position: Optional[list[float]] = None
+    # Vision이 이 사과를 감지했을 때의 카메라 좌표 (VisionFeatureIn.center 그대로).
+    # 답변이 해석되면 이 좌표를 그대로 실어서 /decision/result로 발행해야
+    # 로봇 쪽(apple_sorting_cycle.py)이 실제로 이 사과를 집어서 옮길 수 있음.
     state: HITLState = HITLState.IDLE
     attempt: int = 0
     session_id: str = dc_field(default_factory=lambda: __import__("uuid").uuid4().hex[:8])
@@ -83,7 +87,7 @@ class HITLStateMachine:
     def __init__(self) -> None:
         self._current: Optional[HITLSession] = None
         self._answer_future: Optional[asyncio.Future] = None
-        self._pending: deque[tuple[str, str, float]] = deque()
+        self._pending: deque[tuple[str, str, float, Optional[list[float]]]] = deque()
         self._lock = asyncio.Lock()
         # _lock: _current와 _pending을 동시에 여러 코루틴이 건드리는 것을 방지.
         # (예: consumer loop가 새 ask_human을 넣는 동시에 세션 종료 처리가 겹치는 경우)
@@ -92,13 +96,22 @@ class HITLStateMachine:
     # 외부(consumer loop, decision_planner 호출부)에서 부르는 진입점
     # ------------------------------------------------------------------
     async def handle_ask_human(
-        self, fruit_type: str, condition: str, vision_confidence: float
+        self,
+        fruit_type: str,
+        condition: str,
+        vision_confidence: float,
+        position: Optional[list[float]] = None,
     ) -> None:
         """
         decision_planner.decide()가 action="ask_human"을 반환했을 때 호출.
         이미 세션이 진행 중이면 대기열에 쌓고, 아니면 즉시 세션을 시작.
         블로킹하지 않도록 백그라운드 task로 실행됨 (main.py의 consumer loop가
         HITL 대화가 끝날 때까지 다른 Vision 프레임 처리를 멈추지 않게 하기 위함).
+
+        position: DecisionResult.position(=Vision이 감지한 카메라 좌표)을 그대로
+        전달받아 세션에 보관함 - 답변이 해석된 뒤 이 좌표 없이 RESUME만 보내면
+        로봇이 실제로 어느 사과를 어디로 옮겨야 하는지 알 수 없어 아무 동작도
+        하지 않는 문제가 있었음 (아래 _ask_and_wait 참고).
         """
         async with self._lock:
             if self._current is not None:
@@ -106,12 +119,13 @@ class HITLStateMachine:
                     "HITL 세션 진행 중, 대기열에 추가: fruit=%s condition=%s",
                     fruit_type, condition,
                 )
-                self._pending.append((fruit_type, condition, vision_confidence))
+                self._pending.append((fruit_type, condition, vision_confidence, position))
                 return
             self._current = HITLSession(
                 fruit_type=fruit_type,
                 condition=condition,
                 vision_confidence=vision_confidence,
+                position=position,
             )
 
         asyncio.create_task(self._run_session())
@@ -166,10 +180,16 @@ class HITLStateMachine:
             )
             result_destination = updated["destination"]
 
-        bridge_manager.publish_command(
-            command_type="RESUME",
-            payload={"fruit_type": session.fruit_type, "destination": result_destination},
-        )
+        if result_destination is not None:
+            # 관리자가 destination을 지정한 경우에만 실제로 옮기게 함 (지정 안 하면
+            # 이 사과는 그냥 세션만 정리하고 로봇 판단에 맡기지 않음 - 아래 comment 참고)
+            bridge_manager.publish_decision_result(
+                fruit=session.fruit_type,
+                destination=result_destination,
+                pose=session.position,
+                reason="admin_force_reset",
+                condition=session.condition,
+            )
         logger.warning(
             "관리자 강제 리셋 (session_id=%s): destination=%s",
             session.session_id, result_destination,
@@ -297,6 +317,14 @@ class HITLStateMachine:
         질문 1회 던지고 답을 기다려 해석/저장까지 시도.
         성공(RESUME까지 완료)하면 True, 실패(재질문 필요)하면 False 반환.
         """
+        # 답변 Future를 질문 생성/TTS보다 먼저 만들어둠. VLA_ASK_HUMAN 브로드캐스트는
+        # _run_session()에서 이미 TTS보다 훨씬 먼저 나가서 HMI 팝업이 즉시 뜨는데,
+        # 이 Future가 TTS가 다 끝난 뒤에야 생기면 사람이 팝업을 보자마자(TTS가 아직
+        # 재생 중일 때) 버튼을 눌렀을 때 submit_answer()가 "아직 답변 대기 중이 아님"으로
+        # 판단해 무조건 409를 반환하는 문제가 있었음 (실제로 겪은 버그 - HMI에서
+        # 팝업 누르면 오류가 뜸). 미리 만들어두면 ASKING 단계에서 답이 와도 그대로 받힘.
+        self._answer_future = asyncio.get_event_loop().create_future()
+
         # 1) 질문 생성 및 TTS 출력
         session.state = HITLState.ASKING
         try:
@@ -309,11 +337,15 @@ class HITLStateMachine:
             question = f"{session.fruit_type} 처리 방법을 확인해 주세요. 정상, 가공, 폐기 중 선택해 주세요."
 
         from stt_tts import tts_service  # 지연 import: 순환 참조 방지 및 아직 미구현 상태 대비
-        await tts_service.speak(question)
+
+        # TTS가 재생되는 동안에도 이미 위에서 만들어둔 Future가 답을 받을 수 있으므로,
+        # HMI에서 TTS보다 먼저 버튼을 눌러도 더 이상 유실되지 않음. 단, 이 시점에
+        # 이미 답이 와서 Future가 끝나 있으면 굳이 TTS를 끝까지 들려줄 필요 없음.
+        if not self._answer_future.done():
+            await tts_service.speak(question)
 
         # 2) 답변 대기 (STT 백그라운드 + 수동 입력 동시 대기)
         session.state = HITLState.LISTENING
-        self._answer_future = asyncio.get_event_loop().create_future()
         stt_task = asyncio.create_task(self._listen_via_stt())
 
         try:
@@ -347,9 +379,18 @@ class HITLStateMachine:
             raw_answer=raw_answer,
             session_id=session.session_id,
         )
-        bridge_manager.publish_command(
-            command_type="RESUME",
-            payload={"fruit_type": session.fruit_type, "destination": destination},
+        # 로봇 쪽(apple_sorting_cycle.py)은 /robot/command의 RESUME을 실제로 처리하지
+        # 않고 경고 로그만 남기고 무시하도록 되어 있음 (아직 그 부분은 미구현). 로봇의
+        # decision_queue는 오직 /decision/result만 구독해서 pick&place를 실행하므로,
+        # 이 사과를 실제로 옮기게 하려면 "execute" 경로와 동일하게 반드시
+        # publish_decision_result()로 보내야 함 - publish_command(RESUME)만 보내면
+        # 정책은 저장되지만 로봇은 아무 동작도 하지 않는 버그가 있었음.
+        bridge_manager.publish_decision_result(
+            fruit=session.fruit_type,
+            destination=destination,
+            pose=session.position,
+            reason="human_feedback",
+            condition=session.condition,
         )
         logger.info(
             "HITL 세션 완료 (session_id=%s): destination=%s confidence=%.2f",
@@ -370,11 +411,18 @@ class HITLStateMachine:
 
     async def _listen_via_stt(self) -> None:
         """STT로 음성을 듣고, 인식되면 submit_answer()로 Future를 채움.
-        HMI 수동 입력이 먼저 도착해 Future가 이미 닫혔다면 조용히 무시됨."""
+        HMI 수동 입력이 먼저 도착해 Future가 이미 닫혔다면 조용히 무시됨.
+
+        mic_lock으로 감싸는 이유: 웨이크워드 대기 루프(wakeup_listener.py)나 음성
+        정책 명령(voice_policy.py)이 동시에 같은 마이크 장치를 열지 못하게 막기
+        위함. 이미 다른 주체가 마이크를 쓰고 있으면 그게 끝날 때까지 대기했다가
+        듣기 시작함 (hitl_response_timeout_sec 안에 안 끝나면 시간 초과로 재질문)."""
         from stt_tts import stt_service  # 지연 import
+        from stt_tts.mic_lock import mic_lock
 
         try:
-            raw = await stt_service.listen_once(timeout_sec=settings.hitl_response_timeout_sec)
+            async with mic_lock:
+                raw = await stt_service.listen_once(timeout_sec=settings.hitl_response_timeout_sec)
             if raw:
                 self.submit_answer(raw)
         except asyncio.CancelledError:
@@ -388,9 +436,10 @@ class HITLStateMachine:
         async with self._lock:
             if not self._pending or self._current is not None:
                 return
-            fruit_type, condition, confidence = self._pending.popleft()
+            fruit_type, condition, confidence, position = self._pending.popleft()
             self._current = HITLSession(
-                fruit_type=fruit_type, condition=condition, vision_confidence=confidence
+                fruit_type=fruit_type, condition=condition, vision_confidence=confidence,
+                position=position,
             )
         asyncio.create_task(self._run_session())
 
