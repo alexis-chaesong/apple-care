@@ -10,7 +10,7 @@ Force-based Placing (최종 통합본 - 노션 백업용)
 
 import time
 
-DOWN_SPEED_VEL = 20        # 내려가는 속도 (mm/s)
+DOWN_SPEED_VEL = 30        # 내려가는 속도 (mm/s)
 DOWN_SPEED_ACC = 20        # 가속도
 MAX_DOWN_DISTANCE = 150    # 접촉을 못 찾았을 때 최대 몇 mm까지 내려갈지 (안전 마진 확보)
 FORCE_THRESHOLD = 4        # 힘 변화량 임계값 (N) - 필요시 8~15 사이로 튜닝
@@ -35,6 +35,15 @@ EXISTING_APPLE_HOVER_CLEARANCE = 40  # mm
 # (DOWN_SPEED_VEL/MAX_DOWN_DISTANCE를 바꿔도 자동으로 맞춰지도록 계산식으로 둠)
 _TRAVEL_TIME = MAX_DOWN_DISTANCE / DOWN_SPEED_VEL
 TIMEOUT_SEC = _TRAVEL_TIME + 2.5
+
+# 실제로는 바닥/사과에 닿아서 더 이상 못 내려가고 있는데도, 힘 변화량이
+# force_threshold를 못 넘어서(사과가 물러서 충격이 완만하거나 센서 노이즈에
+# 묻히는 경우) 계속 대기하다 결국 타임아웃으로 실패 처리되는 문제가 있었음.
+# 그래서 힘 조건과 별개로 "z가 이만큼(STALL_TIME_SEC) 안 움직이면 그냥 접촉된
+# 것으로 본다"는 조건을 추가함 - 힘제어 하강 중에 z가 안 움직인다는 것 자체가
+# 이미 뭔가에 막혀 있다는 뜻이기 때문.
+STALL_TIME_SEC = 2.0        # z가 이 시간(초) 이상 거의 안 움직이면 접촉으로 간주
+STALL_Z_EPSILON_MM = 0.5    # 이 이하의 z 변화는 "안 움직임"으로 취급 (컨트롤러/센서 노이즈 감안)
 
 
 def force_controlled_place(node, current_pos, force_threshold=FORCE_THRESHOLD):
@@ -96,6 +105,11 @@ def force_controlled_place(node, current_pos, force_threshold=FORCE_THRESHOLD):
     contact_detected = False
     last_log_time = start_time
 
+    # z-스톨(안 움직임) 감지용 기준값. 처음엔 아직 기준 z를 못 정했으니 None으로
+    # 시작하고, 루프 첫 iteration에서 바로 채워짐.
+    stall_ref_z = None
+    stall_ref_time = start_time
+
     # 이 while 루프는 반드시 try/finally로 감싸야 함: 도중에 예외/Ctrl+C로
     # 빠져나가도 release_force()/release_compliance_ctrl()이 호출되지 않으면
     # 로봇 컨트롤러가 힘/컴플라이언스 제어 상태로 남아있게 되는 안전 문제가 있음.
@@ -123,6 +137,24 @@ def force_controlled_place(node, current_pos, force_threshold=FORCE_THRESHOLD):
                     last_log_time = now
             else:
                 node.get_logger().warn('get_tool_force 호출 실패 - 데이터를 읽을 수 없습니다.')
+
+            # 힘 임계값과 별개로, z 자체가 STALL_TIME_SEC 이상 거의 안 움직이면
+            # (=뭔가에 막혀서 더 이상 못 내려가는 중) 접촉으로 간주하고 종료.
+            current_pos_now, _ = get_current_posx(DR_BASE)
+            if current_pos_now is not None:
+                current_z = current_pos_now[2]
+                now = time.time()
+                if stall_ref_z is None or abs(current_z - stall_ref_z) > STALL_Z_EPSILON_MM:
+                    # z가 움직였으니(또는 첫 샘플이니) 스톨 기준을 지금 위치/시각으로 갱신
+                    stall_ref_z = current_z
+                    stall_ref_time = now
+                elif now - stall_ref_time >= STALL_TIME_SEC:
+                    contact_detected = True
+                    node.get_logger().info(
+                        f'힘 변동량은 임계값 미달이지만 z가 {STALL_TIME_SEC:.1f}초 이상 '
+                        f'안 움직여 접촉으로 간주합니다 (z={current_z:.2f}mm).'
+                    )
+                    break
 
             time.sleep(0.01)
     finally:

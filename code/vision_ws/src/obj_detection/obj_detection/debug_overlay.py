@@ -12,7 +12,7 @@ detection.py의 `class ObjectDetectionNode(..., DebugOverlayMixin, ...)`로
 self.background_distance_mm, self._stop_depth_debug, self._last_debug_info,
 self._debug_info_lock은 ObjectDetectionNode.__init__에서 준비되고,
 self._box_ring_depths/_real_world_diameter_mm/_find_all_unknown_blobs(depth_utils),
-self._avg_normal_diameter/_preview_size_label/_add_normal_sample(size_classifier)는
+self._normal_size_stats/_preview_size_label/_add_normal_sample(size_classifier)는
 다른 mixin이 제공한다는 전제로 작성됨.
 """
 
@@ -58,6 +58,7 @@ class DebugOverlayMixin:
         msg = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
         self.debug_image_pub.publish(msg)
 
+
     def _depth_debug_loop(self):
         """뎁스 프레임에 컬러맵을 입히고, 화면에 보이는 모든 사과에 대해 실시간으로
         박스/뎁스값/크기 판정을 오버레이로 그려서 로컬 창으로 띄운다.
@@ -95,6 +96,7 @@ class DebugOverlayMixin:
             time.sleep(DEBUG_IMAGE_PERIOD_SEC)
         cv2.destroyWindow(DEPTH_DEBUG_WINDOW_NAME)
 
+
     def _draw_all_detections(self, colormap, depth_frame, detections):
         """현재 프레임에서 YOLO가 찾은 모든 박스에 대해 depth 기반 판정 근거를
         각 박스 위에 그린다 (높이차 통과 여부, 실제 지름, 크기 재분류 미리보기).
@@ -109,7 +111,7 @@ class DebugOverlayMixin:
         있는데 화면에는 아무 박스도 안 그려져서 "왜 이 물체는 안 잡히지?"처럼 보임.
         """
         h, w = colormap.shape[:2]
-        avg_diameter = self._avg_normal_diameter()
+        sample_count, avg_diameter = self._normal_size_stats()
         yolo_boxes = []  # depth_ok 여부와 무관하게, YOLO가 낸 모든 박스 (자홍 블롭 억제용)
 
         for label, score, box in detections:
@@ -132,7 +134,7 @@ class DebugOverlayMixin:
                 caption = f"{label} {score:.2f} depth-FAIL"
             else:
                 diameter_mm = self._real_world_diameter_mm(depth_frame, box)
-                preview_label = self._preview_size_label(label, diameter_mm, avg_diameter)
+                preview_label = self._preview_size_label(label, diameter_mm, avg_diameter, sample_count)
                 diameter_txt = f"{diameter_mm:.0f}mm" if diameter_mm is not None else "-"
                 if preview_label != label:
                     caption = f"{preview_label} {score:.2f} {diameter_txt}"
@@ -148,7 +150,7 @@ class DebugOverlayMixin:
                     and score >= MIN_KNOWN_CONFIDENCE and diameter_mm is not None
                 ):
                     self._add_normal_sample(diameter_mm)
-                    avg_diameter = self._avg_normal_diameter()
+                    sample_count, avg_diameter = self._normal_size_stats()
 
             text_y = y1 - 8 if y1 - 8 > 10 else y2 + 18
             cv2.putText(
@@ -167,6 +169,7 @@ class DebugOverlayMixin:
             )
 
         self._draw_unknown_blob(colormap, depth_frame, yolo_boxes)
+
 
     def _draw_unknown_blob(self, colormap, depth_frame, yolo_boxes):
         """YOLO가 후보조차 못 낸 곳인데 depth로는 튀어나와 보이는 덩어리를 전부

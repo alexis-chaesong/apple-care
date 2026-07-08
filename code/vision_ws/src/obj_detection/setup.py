@@ -27,6 +27,7 @@ setup(
     entry_points={
         'console_scripts': [
             'object_detection = obj_detection.detection:main',
+            'prepare_camera = obj_detection.prepare_camera:main',
         ],
     },
 )

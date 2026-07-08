@@ -1,12 +1,3 @@
-다음 순으로 하면 됨
-
-# 로봇 실행
-로봇패키지 소스
-roboton 아니면 bring_rg
-
-# realsense
-realsense
-
 # 백엔드, 프론드 단축어 - 앞에 경로 본인 상황에 맞게 수정할 것
 # 이건 .bashrc 맨 아래에 추가하면 됨
 alias bck='cd ~/apple-care/code/backend && uvicorn main:app --reload'
@@ -23,6 +14,17 @@ function p2(){
   [ -f ~/apple-care/code/robot_ws/install/setup.bash ] && source ~/apple-care/code/robot_ws/install/setup.bash
 }
 
+다음 순으로 하면 됨
+
+# 로봇 실행
+로봇패키지 소스
+roboton 아니면 bring_rg
+
+# realsense
+realsense
+
+# 카메라 위치로 이동
+ros2 run obj_detection prepare_camera
 
 # vision_ws - 앞에 경로 본인 상황에 맞게 수정할 것
 cd ~/apple-care/code/vision_ws && colcon build --symlink-install
@@ -34,3 +36,6 @@ source install/setup.bash
 
 # 하고 나서 p2 하면 둘다 소스 처리됨
 
+# 이후
+obd 먼저 하고
+acr

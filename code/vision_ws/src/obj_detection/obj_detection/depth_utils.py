@@ -48,7 +48,7 @@ NOISE_OPEN_KERNEL_PX = 9
 # (아래 INNER_DEPTH_PERCENTILE로 박스 안쪽의 "정점 부근" 값을 쓰게 되어 이전보다
 # 실제 사과 높이에 가깝게 측정되므로, median 기준으로 튜닝했던 값(100mm)은 너무
 # 커서 실제 사과도 거의 다 FAIL 처리됨 - 사과 지름(약 60~90mm) 이하로 낮춰야 함)
-HEIGHT_DIFF_MARGIN_MM = 30
+HEIGHT_DIFF_MARGIN_MM = 20
 # 박스 바깥 주변 깊이를 샘플링할 테두리 두께(px)
 HEIGHT_DIFF_RING_PX = 20
 # 박스 안쪽 depth 중 몇 번째 percentile을 "정점(사과 꼭대기)"으로 볼지.

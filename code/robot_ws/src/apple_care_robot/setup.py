@@ -11,6 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/apple_care.launch.py']),
+        ('share/' + package_name + '/resource', ['resource/T_gripper2camera.npy']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
