@@ -1,6 +1,7 @@
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
-from cv_bridge import CvBridge
+
+from obj_detection.ros_image_utils import imgmsg_to_cv2
 
 
 class ImgNode(Node):
@@ -8,7 +9,6 @@ class ImgNode(Node):
 
     def __init__(self):
         super().__init__('img_node')
-        self.bridge = CvBridge()
         self.color_frame = None
         self.color_frame_stamp = None
         self.depth_frame = None
@@ -25,11 +25,11 @@ class ImgNode(Node):
         self.intrinsics = {"fx": msg.k[0], "fy": msg.k[4], "ppx": msg.k[2], "ppy": msg.k[5]}
 
     def color_callback(self, msg):
-        self.color_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        self.color_frame = imgmsg_to_cv2(msg, desired_encoding='bgr8')
         self.color_frame_stamp = str(msg.header.stamp.sec) + str(msg.header.stamp.nanosec)
 
     def depth_callback(self, msg):
-        self.depth_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        self.depth_frame = imgmsg_to_cv2(msg, desired_encoding='passthrough')
 
     def get_color_frame(self):
         return self.color_frame

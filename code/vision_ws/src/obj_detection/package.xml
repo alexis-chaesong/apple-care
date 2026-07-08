@@ -9,7 +9,9 @@
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>cv_bridge</exec_depend>
+  <!-- Humble의 cv_bridge는 numpy2와 호환이 안 돼 ros_image_utils.py가 자체
+       구현으로 우회함 (건너뜀). Jazzy 이후는 cv_bridge 그대로 사용. -->
+  <exec_depend condition="$ROS_DISTRO != 'humble'">cv_bridge</exec_depend>
   <exec_depend>apple_care_msgs</exec_depend>
   <exec_depend>python3-pymodbus</exec_depend>
   <!-- prepare_camera.py는 로봇 이동을 위해 DSR_ROBOT2를 가져다 씀. 이건 colcon
