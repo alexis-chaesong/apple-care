@@ -40,7 +40,10 @@ def _depth_offset_for_condition(condition):
     return None
 
 
-def pick_apple(node, pick_pos, safe_movel_fn=None, *, emergency_stop_event=None, stop_node=None):
+def pick_apple(
+    node, pick_pos, safe_movel_fn=None, *,
+    emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
+):
     """
     사과를 집는 함수.
     1) (트레이 벽 근처면) 대각선 경유점을 먼저 거쳐서 벽과의 충돌 없이 접근
@@ -63,6 +66,9 @@ def pick_apple(node, pick_pos, safe_movel_fn=None, *, emergency_stop_event=None,
             grasp_apple_with_force_feedback()으로 그대로 전달됨. 안 넘기면(기본값)
             이 구간에서는 감시하지 않음 (safe_movel_fn이 이동 중에는 이미 감시하므로
             완전한 사각지대는 아니지만, 파지 구간 자체는 별도로 챙겨야 함).
+        check_hw_safety_stop: grasp_apple_with_force_feedback()으로 그대로 전달됨 -
+            파지 구간에서도 소프트웨어 명령 없이 펜던트 물리 비상정지 버튼이
+            눌리는 경우를 감지함 (safe_motion.make_hw_safety_watcher 참고).
 
     Returns:
         bool: 파지 성공 여부 (손목 힘 센서로 접촉/파지가 확인됐는지)
@@ -88,6 +94,7 @@ def pick_apple(node, pick_pos, safe_movel_fn=None, *, emergency_stop_event=None,
     node.get_logger().info('실시간 힘 감지로 그리퍼 닫기 (사과 크기에 맞춰 힘 자동 조절)')
     applied_force, picked_ok = grasp_apple_with_force_feedback(
         node, emergency_stop_event=emergency_stop_event, stop_node=stop_node,
+        check_hw_safety_stop=check_hw_safety_stop,
     )
     node.get_logger().info(f'최종 적용된 파지 힘: {applied_force} (파지 성공 여부: {picked_ok})')
     if not picked_ok:

@@ -65,7 +65,9 @@ from apple_care_robot.pick_helpers import (
 from apple_care_robot.vision_transform import camera_to_base
 from apple_care_robot.status_bus import StatusBus
 from apple_care_robot.estop_handler import EstopRecoveryTracker, check_and_recover
-from apple_care_robot.safe_motion import safe_movel, safe_movej, EmergencyStopError
+from apple_care_robot.safe_motion import (
+    safe_movel, safe_movej, EmergencyStopError, is_controller_in_hardware_safety_stop,
+)
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
@@ -140,11 +142,18 @@ def main(args=None):
     emergency_stop = threading.Event()
     estop_tracker = EstopRecoveryTracker()
 
+    # 이동/힘제어 폴링 루프 안에서 공용으로 쓸 하드웨어 안전정지 조회 콜백.
+    # comm_node를 넘기는 이유: stop_motion()과 동일하게 DSR 제어용 메인 node를
+    # 여기서 또 spin하면 충돌 위험이 있음 (comm_node는 이미 별도 스레드에서 spin 중).
+    def check_hw_safety_stop():
+        return is_controller_in_hardware_safety_stop(comm_node)
+
     def do_safe_movel(target, vel=None, acc=None, ref=None):
         safe_movel(
             comm_node, target, emergency_stop,
             amovel=amovel, check_motion=check_motion, wait=wait,
             vel=vel, acc=acc, ref=ref,
+            check_hw_safety_stop=check_hw_safety_stop,
         )
 
     def do_safe_movej(target, vel=None, acc=None):
@@ -152,6 +161,7 @@ def main(args=None):
             comm_node, target, emergency_stop,
             amovej=amovej, check_motion=check_motion, wait=wait,
             vel=vel, acc=acc,
+            check_hw_safety_stop=check_hw_safety_stop,
         )
 
     def recover_from_estop_if_needed() -> bool:
@@ -183,6 +193,9 @@ def main(args=None):
             check_motion=check_motion, gripper_open=gripper_open,
             home_pos=HOME, camera_pos=CAMERA,
             get_current_pos=lambda: get_current_posx(DR_BASE)[0], posx_factory=posx,
+            # comm_node를 넘기는 이유: stop_motion()과 동일하게 DSR 제어용 메인 node를
+            # 여기서 또 spin하면 충돌 위험이 있음 (comm_node는 이미 별도 스레드에서 spin 중).
+            check_hw_safety_stop=lambda: is_controller_in_hardware_safety_stop(comm_node),
         )
 
     # ------------------------------------------------------------------
@@ -338,6 +351,7 @@ def main(args=None):
             contact_ok = force_controlled_place(
                 node, safe_hover_pos, force_threshold=EXISTING_APPLE_FORCE_THRESHOLD,
                 emergency_stop_event=emergency_stop, stop_node=comm_node,
+                check_hw_safety_stop=check_hw_safety_stop,
             )
         else:
             node.get_logger().info(f"{name}: 박스가 비어 있음을 확인 - 기존 접근 방법대로 진행합니다.")
@@ -346,6 +360,7 @@ def main(args=None):
             contact_ok = force_controlled_place(
                 node, box_pos,
                 emergency_stop_event=emergency_stop, stop_node=comm_node,
+                check_hw_safety_stop=check_hw_safety_stop,
             )
 
         status_bus.set_motion("PLACING", name)
@@ -418,6 +433,21 @@ def main(args=None):
     status_bus.set_state("READY")
 
     while rclpy.ok():
+        # 사과 사이사이(대기 중)에는 이동/힘제어 폴링 루프 자체가 없어서, 그
+        # 안에 있는 hw_safety_watch도 전혀 안 돌고 있음 - 그래서 소프트웨어
+        # /robot/command 없이 펜던트 물리 비상정지 버튼만 눌린 경우를 여기서
+        # 따로 확인해야 함. decision_queue.get(timeout=1.0)이 어차피 매
+        # 반복마다 최대 1초씩 대기하므로, 이 확인도 자연스럽게 초당 1회
+        # 정도로만 나가 과부하가 없음.
+        if not emergency_stop.is_set():
+            hw_blocked, hw_state_name = is_controller_in_hardware_safety_stop(comm_node)
+            if hw_blocked:
+                node.get_logger().error(
+                    f"대기 중 컨트롤러 하드웨어 안전정지 감지({hw_state_name}) - "
+                    "EMERGENCY_STOP 처리로 전환합니다."
+                )
+                emergency_stop.set()
+
         # 사과 사이사이(대기 중)에 비상정지가 걸린 경우 - 지금 진행 중인 이동이
         # 없어서 아래 try/except(이동 도중 감지용)로는 못 잡으므로 별도로 확인.
         if recover_from_estop_if_needed():
@@ -474,6 +504,7 @@ def main(args=None):
                 picked_ok = pick_apple(
                     node, pick_pos, do_safe_movel,
                     emergency_stop_event=emergency_stop, stop_node=comm_node,
+                    check_hw_safety_stop=check_hw_safety_stop,
                 )
                 status_bus.publish_gripper_status(picked_ok)
                 if picked_ok:

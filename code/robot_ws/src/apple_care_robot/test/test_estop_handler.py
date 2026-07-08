@@ -255,12 +255,16 @@ class _FakeStatusBus:
     def __init__(self):
         self.states = []
         self.gripper_statuses = []
+        self.safety_events = []
 
     def set_state(self, state, msg=None):
         self.states.append((state, msg))
 
     def publish_gripper_status(self, grasped):
         self.gripper_statuses.append(grasped)
+
+    def publish_safety(self, error_code, error_msg=""):
+        self.safety_events.append((error_code, error_msg))
 
 
 def test_check_and_recover_returns_false_when_not_triggered():
@@ -338,6 +342,75 @@ def test_check_and_recover_runs_recovery_and_clears_event_when_triggered():
     # 그리퍼도 다시 열렸음을 알려야 함(gripper_grasped가 안 풀리는 문제 방지).
     assert ("READY", None) in status_bus.states
     assert False in status_bus.gripper_statuses
+
+
+def test_check_and_recover_blocks_and_keeps_event_set_when_hw_safety_stopped():
+    # 펜던트/안전펜스의 물리 비상정지 버튼이 눌려 컨트롤러가 하드웨어
+    # 안전정지 상태(예: SAFE_STOP)이면, emergency_stop_event가 걸려 있어도
+    # 복구 이동(movel/movej)을 내보내면 안 되고, 이벤트도 clear하면 안 됨 -
+    # 그래야 호출부가 다음 decision을 처리하지 않고 계속 재확인하게 됨.
+    import threading
+
+    node = _FakeNode()
+    status_bus = _FakeStatusBus()
+    tracker = EstopRecoveryTracker()
+    tracker.begin_pick_attempt(pick_pos="PICK_POS_1")
+    event = threading.Event()
+    event.set()
+    calls = []
+
+    triggered = check_and_recover(
+        node, status_bus, tracker, event,
+        movel=lambda pos: calls.append(("movel", pos)),
+        movej=lambda pos: calls.append(("movej", pos)),
+        wait=lambda sec: calls.append(("wait", sec)),
+        check_motion=lambda: False,
+        gripper_open=lambda: calls.append(("gripper_open",)) or True,
+        home_pos="HOME",
+        camera_pos="CAMERA",
+        get_current_pos=_fake_get_current_pos,
+        posx_factory=_fake_posx_factory,
+        check_hw_safety_stop=lambda: (True, "SAFE_STOP"),
+    )
+
+    assert triggered is True
+    assert event.is_set() is True  # 계속 걸린 채로 유지되어야 다음 루프에서 다시 확인함
+    # 실제 복구 이동(movel/movej/gripper_open)은 하나도 나가면 안 됨
+    assert not any(call[0] in ("movel", "movej", "gripper_open") for call in calls)
+    assert any(level == "error" for level, _ in node.get_logger().messages)
+    assert ("ERROR", "controller_safety_stop:SAFE_STOP") in status_bus.states
+    # 원위치 복귀 계획도 그대로 남아있어야 함 (복구가 아직 시작되지 않았으므로)
+    assert tracker.get_recovery_plan().action == "RETURN_TO_ORIGIN"
+
+
+def test_check_and_recover_proceeds_when_hw_safety_stop_check_reports_clear():
+    # 컨트롤러가 안전정지 상태가 아니면(is_blocked=False) 평소처럼 복구가 진행돼야 함.
+    import threading
+
+    node = _FakeNode()
+    status_bus = _FakeStatusBus()
+    tracker = EstopRecoveryTracker()  # 정상 상태 (RESUME_AT_CAMERA)
+    event = threading.Event()
+    event.set()
+    calls = []
+
+    triggered = check_and_recover(
+        node, status_bus, tracker, event,
+        movel=lambda pos: calls.append(("movel", pos)),
+        movej=lambda pos: calls.append(("movej", pos)),
+        wait=lambda sec: calls.append(("wait", sec)),
+        check_motion=lambda: False,
+        gripper_open=lambda: calls.append(("gripper_open",)) or True,
+        home_pos="HOME",
+        camera_pos="CAMERA",
+        get_current_pos=_fake_get_current_pos,
+        posx_factory=_fake_posx_factory,
+        check_hw_safety_stop=lambda: (False, ""),
+    )
+
+    assert triggered is True
+    assert event.is_set() is False  # 정상 복구가 끝났으므로 이번엔 clear되어야 함
+    assert any(call[0] == "movel" for call in calls)
 
 
 def test_check_and_recover_when_not_holding_skips_origin_and_resumes_at_camera():

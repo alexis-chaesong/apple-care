@@ -10,7 +10,7 @@ Force-based Placing (최종 통합본 - 노션 백업용)
 
 import time
 
-from apple_care_robot.safe_motion import raise_if_emergency_stop
+from apple_care_robot.safe_motion import raise_if_emergency_stop, make_hw_safety_watcher
 
 DOWN_SPEED_VEL = 30        # 내려가는 속도 (mm/s)
 DOWN_SPEED_ACC = 20        # 가속도
@@ -50,7 +50,7 @@ STALL_Z_EPSILON_MM = 0.5    # 이 이하의 z 변화는 "안 움직임"으로 �
 
 def force_controlled_place(
     node, current_pos, force_threshold=FORCE_THRESHOLD,
-    *, emergency_stop_event=None, stop_node=None,
+    *, emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
 ):
     """
     현재 위치에서 수직으로 내려가다가 바닥 감지 시 멈추는 함수
@@ -67,13 +67,19 @@ def force_controlled_place(
             경로에 /robot/command 연동이 없는 호출부에서의 하위 호환을 위함.
         stop_node: emergency_stop_event를 쓸 때, motion/move_stop 서비스 클라이언트를
             만들 rclpy 노드 (보통 comm_node). 안 주면 node를 그대로 사용.
+        check_hw_safety_stop: 넘겨주면(예: safe_motion.is_controller_in_hardware_safety_stop을
+            노드에 바인딩한 callable) 힘제어 하강 중에도 컨트롤러의 하드웨어
+            안전정지 상태(펜던트 물리 비상정지 버튼)를 감시함 - /robot/command로
+            소프트웨어 명령이 안 들어와도 이 구간에서 물리 버튼이 눌리면 감지됨
+            (safe_motion.make_hw_safety_watcher 참고). None이면(기본값) 감시하지 않음.
 
     Returns:
         bool: True면 접촉 성공, False면 타임아웃 또는 실패
 
     Raises:
-        EmergencyStopError: emergency_stop_event가 힘제어 도중 걸리면 발생.
-            아래 finally 블록의 예외 안전 처리는 그대로 실행되므로, 하강 목표
+        EmergencyStopError: emergency_stop_event가 힘제어 도중 걸리거나(또는
+            check_hw_safety_stop이 하드웨어 안전정지를 감지하면) 발생. 아래
+            finally 블록의 예외 안전 처리는 그대로 실행되므로, 하강 목표
             취소(amovel)와 컴플라이언스 모드 해제 둘 다 이 경우에도 정상 수행됨.
     """
     from DSR_ROBOT2 import (
@@ -117,6 +123,14 @@ def force_controlled_place(
     
     amovel(target_down, vel=DOWN_SPEED_VEL, acc=DOWN_SPEED_ACC, ref=DR_BASE)
     time.sleep(0.1)  # 출발 직후 순간적인 움직임 관성 노이즈 스킵용 대기
+
+    # emergency_stop_event가 없으면(하위 호환 호출부) check_hw_safety_stop이 있어도
+    # 걸어둘 이벤트 자체가 없으므로 감시하지 않음 - make_hw_safety_watcher는 감지 시
+    # emergency_stop_event.set()을 호출하므로 None이면 AttributeError가 남.
+    hw_safety_watch = make_hw_safety_watcher(
+        stop_node or node, emergency_stop_event,
+        check_hw_safety_stop if emergency_stop_event is not None else None,
+    )
 
     start_time = time.time()
     contact_detected = False
@@ -186,6 +200,9 @@ def force_controlled_place(
             # 하강 목표 취소/모드 해제는 정상적으로 이뤄짐.
             if emergency_stop_event is not None:
                 raise_if_emergency_stop(stop_node or node, emergency_stop_event)
+            # 소프트웨어 명령 없이 펜던트 물리 비상정지 버튼만 눌린 경우도
+            # 잡기 위해, 쓰로틀링된 하드웨어 상태 감시도 같이 확인함.
+            hw_safety_watch()
 
             time.sleep(0.01)
     finally:
@@ -205,7 +222,7 @@ def force_controlled_place(
             node.get_logger().warn(f'현재 위치 취소용 get_current_posx/amovel 실패 (무시하고 release 진행): {e}')
 
         # 5) 안전을 위해 컴플라이언스 및 힘 제어 모드 해제
-        release_force()
+        release_force(0.2)
         release_compliance_ctrl()
         time.sleep(0.1)
 

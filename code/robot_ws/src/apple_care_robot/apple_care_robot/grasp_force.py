@@ -28,7 +28,7 @@ Force-Feedback Grasping
 import time
 
 from apple_care_robot.openclose import gripper_close_with_force, GRIPPER_MAX_FORCE
-from apple_care_robot.safe_motion import raise_if_emergency_stop
+from apple_care_robot.safe_motion import raise_if_emergency_stop, make_hw_safety_watcher
 
 FORCE_STEP = 50                 # 매 단계 힘 증가량 (openclose.py 레지스터 단위, 0.1N = 5N)
 GRASP_FORCE_THRESHOLD = 3.0     # 손목 반발력 변화량(N)이 이 값을 넘으면 "제대로 눌렀다/잡았다"고 판단
@@ -40,7 +40,7 @@ SAFETY_MARGIN_STEPS = 2         # 안전 여유분 단계 수 (2단계 = +100, F
 
 
 def grasp_apple_with_force_feedback(
-    node, initial_force=100, *, emergency_stop_event=None, stop_node=None,
+    node, initial_force=100, *, emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
 ):
     """
     힘을 조금씩 올려가며, 손목 힘 센서로 감지된 반발력 기준으로
@@ -59,16 +59,29 @@ def grasp_apple_with_force_feedback(
             반영되지 않는 문제가 있었음 (실제로 겪은 문제).
         stop_node: emergency_stop_event를 쓸 때, motion/move_stop 서비스 클라이언트를
             만들 rclpy 노드 (보통 comm_node). 안 주면 node를 그대로 사용.
+        check_hw_safety_stop: 넘겨주면(예: safe_motion.is_controller_in_hardware_safety_stop을
+            노드에 바인딩한 callable) 파지 중에도 컨트롤러의 하드웨어 안전정지
+            상태(펜던트 물리 비상정지 버튼)를 감시함 - /robot/command로 소프트웨어
+            명령이 안 들어와도 이 구간에서 물리 버튼이 눌리면 감지됨
+            (safe_motion.make_hw_safety_watcher 참고). None이면(기본값) 감시하지 않음.
 
     Returns:
         tuple[int, bool]: (최종 적용된 힘 값 0~GRIPPER_MAX_FORCE, 파지 성공 여부)
 
     Raises:
-        EmergencyStopError: emergency_stop_event가 파지 도중 걸리면 발생.
+        EmergencyStopError: emergency_stop_event가 파지 도중 걸리거나(또는
+            check_hw_safety_stop이 하드웨어 안전정지를 감지하면) 발생.
     """
     from DSR_ROBOT2 import get_tool_force, DR_BASE
 
     node.get_logger().info('실시간 힘 감지 방식으로 사과 파지 시작')
+
+    # emergency_stop_event가 없으면(하위 호환 호출부) check_hw_safety_stop이 있어도
+    # 걸어둘 이벤트 자체가 없으므로 감시하지 않음.
+    hw_safety_watch = make_hw_safety_watcher(
+        stop_node or node, emergency_stop_event,
+        check_hw_safety_stop if emergency_stop_event is not None else None,
+    )
 
     current_force = initial_force
     gripper_close_with_force(current_force)
@@ -80,6 +93,9 @@ def grasp_apple_with_force_feedback(
     for _ in range(MAX_GRASP_STEPS):
         if emergency_stop_event is not None:
             raise_if_emergency_stop(stop_node or node, emergency_stop_event)
+        # 소프트웨어 명령 없이 펜던트 물리 비상정지 버튼만 눌린 경우도 잡기 위해,
+        # 쓰로틀링된 하드웨어 상태 감시도 매 단계 같이 확인함.
+        hw_safety_watch()
 
         force = get_tool_force(DR_BASE)
 

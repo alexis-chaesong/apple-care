@@ -5,7 +5,7 @@ import threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from apple_care_robot.safe_motion import (
-    EmergencyStopError, raise_if_emergency_stop, safe_movel, safe_movej,
+    EmergencyStopError, raise_if_emergency_stop, safe_movel, safe_movej, make_hw_safety_watcher,
 )
 
 
@@ -113,6 +113,109 @@ def test_safe_movel_raises_and_stops_motion_when_emergency_stop_set():
         pass
 
     assert len(stop_calls) == 1
+
+
+# ── make_hw_safety_watcher: 이동/힘제어 폴링 중 물리 비상정지 감시 ──────────
+
+def test_hw_safety_watcher_returns_noop_when_check_fn_is_none():
+    node = _FakeNode()
+    event = threading.Event()
+    watch = make_hw_safety_watcher(node, event, None)
+
+    watch()  # 예외 없이 조용히 리턴되어야 함
+    assert event.is_set() is False
+
+
+def test_hw_safety_watcher_raises_and_sets_event_when_blocked():
+    node = _FakeNode()
+    event = threading.Event()
+    stop_calls = []
+    clock = {"now": 0.0}
+
+    watch = make_hw_safety_watcher(
+        node, event,
+        check_hw_safety_stop=lambda: (True, "SAFE_STOP"),
+        interval_sec=0.5,
+        stop_motion_fn=lambda n, mode: stop_calls.append(mode),
+        now_fn=lambda: clock["now"],
+    )
+
+    clock["now"] = 0.5  # 첫 조회 시점(interval_sec 경과)까지 시간을 흘려보냄
+    try:
+        watch()
+        assert False, "EmergencyStopError가 발생했어야 함"
+    except EmergencyStopError:
+        pass
+
+    assert event.is_set() is True
+    assert len(stop_calls) == 1
+
+
+def test_hw_safety_watcher_throttles_calls_within_interval():
+    node = _FakeNode()
+    event = threading.Event()
+    call_count = [0]
+    clock = {"now": 0.0}
+
+    def fake_check():
+        call_count[0] += 1
+        return False, ""
+
+    watch = make_hw_safety_watcher(
+        node, event, check_hw_safety_stop=fake_check, interval_sec=0.5, now_fn=lambda: clock["now"],
+    )
+
+    watch()  # 생성 직후(now=0.0) - 아직 interval_sec 안 지났으니 조회 안 함
+    assert call_count[0] == 0
+
+    clock["now"] = 0.2
+    watch()  # 여전히 0.5초 안 지남
+    assert call_count[0] == 0
+
+    clock["now"] = 0.5
+    watch()  # 이제 조회함
+    assert call_count[0] == 1
+
+    clock["now"] = 0.6
+    watch()  # 방금 조회했으니 다시 안 함
+    assert call_count[0] == 1
+
+
+def test_hw_safety_watcher_does_not_raise_when_not_blocked():
+    node = _FakeNode()
+    event = threading.Event()
+    clock = {"now": 0.0}
+
+    watch = make_hw_safety_watcher(
+        node, event, check_hw_safety_stop=lambda: (False, ""), interval_sec=0.5, now_fn=lambda: clock["now"],
+    )
+
+    clock["now"] = 0.5
+    watch()  # 예외 없이 조용히 리턴되어야 함
+    assert event.is_set() is False
+
+
+def test_safe_movel_raises_when_hw_safety_stop_detected():
+    # hw_safety_check_interval_sec=0으로 둬서, 테스트가 실제 벽시계 시간이
+    # 흐르길 기다리지 않고도 첫 폴링에서 바로 하드웨어 상태를 조회하게 함.
+    node = _FakeNode()
+    event = threading.Event()
+
+    try:
+        safe_movel(
+            node, "TARGET_POS", event,
+            amovel=lambda pos, vel=None, acc=None, ref=None: None,
+            check_motion=lambda: True,  # 계속 이동 중이라고 응답
+            wait=lambda sec: None,
+            stop_motion_fn=lambda n, mode: None,
+            check_hw_safety_stop=lambda: (True, "EMERGENCY_STOP"),
+            hw_safety_check_interval_sec=0,
+        )
+        assert False, "EmergencyStopError가 발생했어야 함"
+    except EmergencyStopError:
+        pass
+
+    assert event.is_set() is True
 
 
 def test_safe_movej_starts_amovej_and_supports_emergency_stop():

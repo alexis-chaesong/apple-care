@@ -67,7 +67,7 @@ class EstopRecoveryTracker:
         return RecoveryPlan(action="RESUME_AT_CAMERA", target_pos=None)
 
 
-RECOVERY_LIFT_MM = 400  # 비상정지 직후 벽/테이블 회피용 최소 상승량(mm)
+RECOVERY_LIFT_MM = 200  # 비상정지 직후 벽/테이블 회피용 최소 상승량(mm)
 RECOVERY_SETTLE_SEC = 1.0  # 완전히 멈춘 다음에도 추가로 더 대기하는 여유 시간(초)
 RECOVERY_POLL_SEC = 0.05  # check_motion()으로 정지 여부를 확인하는 폴링 간격(초)
 
@@ -174,9 +174,23 @@ def execute_recovery(
     lifted_pos = posx_factory(
         current_x, current_y, current_z + lift_mm, current_rx, current_ry, current_rz
     )
-    node.get_logger().info(f"[E-STOP] 충돌 회피를 위해 {lift_mm}mm 상승합니다.")
+    node.get_logger().info(
+        f"[E-STOP] 충돌 회피를 위해 {lift_mm}mm 상승합니다. "
+        f"(목표 z={current_z + lift_mm:.1f}, 현재 z={current_z:.1f})"
+    )
     movel(lifted_pos)
     _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="lift")
+
+    # "lift" 구간이 유독 폴링 0회로 나오는 문제(실측 확인) - check_motion() 타이밍
+    # 레이스가 아니라 애초에 목표 지점이 도달 불가능해서(작업공간/관절 한계 등)
+    # amovel() 명령 자체가 무시/실패해 로봇이 전혀 안 움직였을 가능성을 확인하기
+    # 위해, 실제로 z가 얼마나 움직였는지 직접 재서 남김.
+    actual_z_after_lift = get_current_pos()[2]
+    node.get_logger().info(
+        f"[E-STOP][lift] 실제 이동 후 z={actual_z_after_lift:.1f} "
+        f"(기대값={current_z + lift_mm:.1f}, 차이={actual_z_after_lift - current_z:.1f}mm - "
+        f"이 차이가 {lift_mm}mm에 훨씬 못 미치면 상승 자체가 실패/거부된 것)"
+    )
 
     movej(home_pos)
     _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="home")
@@ -207,6 +221,7 @@ def check_and_recover(
     camera_pos,
     get_current_pos: Callable[[], Any],
     posx_factory: Callable[..., Any],
+    check_hw_safety_stop: Optional[Callable[[], "tuple"]] = None,
 ) -> bool:
     """
     emergency_stop_event(threading.Event)가 걸려 있으면 복구를 수행하고 True를 반환.
@@ -215,12 +230,38 @@ def check_and_recover(
 
     status_bus는 set_state(state, msg=None)를 제공하는 객체(StatusBus)면 됨.
 
+    check_hw_safety_stop: 넘겨주면(예: safe_motion.is_controller_in_hardware_safety_stop을
+        노드에 바인딩한 callable), 실제 복구 이동을 내보내기 전에 컨트롤러가
+        하드웨어 레벨로(SAFE_STOP/EMERGENCY_STOP 등) 안전정지 상태인지 먼저 확인함.
+        () -> (is_blocked: bool, state_name: str)를 반환해야 함. 펜던트/안전펜스의
+        물리 비상정지 버튼이 눌린 경우 emergency_stop_event(소프트웨어 플래그)만
+        보고 복구 이동을 내보내면 명령이 조용히 무시되거나 예상치 못하게 동작할 수
+        있어서, 하드웨어가 안전정지 중이면 복구를 시작하지 않고 emergency_stop_event를
+        그대로 걸어둔 채 True만 반환함(호출부는 다음 루프에서 다시 확인하게 됨).
+        None이면(기본값) 이 확인을 건너뜀 - 하위 호환용.
+
     복구 후에는 emergency_stop_event를 clear()해서 다음 루프에서 다시 걸리지 않게
     하고, "무조건 CAMERA로 보내서 재개" 정책에 따라 별도의 재가 명령 없이
     바로 다음 decision을 받을 수 있는 상태로 돌린다.
     """
     if not emergency_stop_event.is_set():
         return False
+
+    if check_hw_safety_stop is not None:
+        is_blocked, state_name = check_hw_safety_stop()
+        if is_blocked:
+            msg = (
+                f"컨트롤러가 하드웨어 안전정지 상태({state_name})입니다 - 현장 안전을 "
+                "확인한 뒤 펜던트/컨트롤러에서 안전정지를 해제해야 소프트웨어 복구를 "
+                "시작할 수 있습니다."
+            )
+            node.get_logger().error(f"[E-STOP] {msg}")
+            status_bus.set_state("ERROR", f"controller_safety_stop:{state_name}")
+            status_bus.publish_safety("ERR_SYSTEM", msg)
+            # emergency_stop_event는 그대로 걸어둔 채 리턴 - 호출부가 다시 decision을
+            # 받지 않고 다음 루프에서 이 함수를 재호출해 상태를 다시 확인하게 함.
+            wait(1.0)
+            return True
 
     node.get_logger().error("EMERGENCY_STOP 감지 - 복구 절차를 시작합니다.")
     status_bus.set_state("ERROR", "emergency_stop")
