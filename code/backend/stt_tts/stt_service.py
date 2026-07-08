@@ -48,6 +48,11 @@ def _record_blocking(duration_sec: float, sample_rate: int) -> np.ndarray:
     """
     실제 마이크 녹음을 수행하는 블로킹 함수.
     asyncio.to_thread()를 통해서만 호출되어야 함 (직접 await하면 이벤트 루프가 멈춤).
+
+    device를 명시하지 않으면 sounddevice(PortAudio)의 시스템 기본 입력 장치를 쓰는데,
+    이게 실제 마이크가 아닌 엉뚱한 장치(HDMI 등)를 가리키면 말을 해도 녹음 레벨이
+    거의 0이라 무음으로 판정됨 - settings.stt_mic_device_index로 명시적으로 지정 가능
+    (scripts/check_mic_level.py로 올바른 장치 번호부터 확인할 것)
     """
     logger.info("마이크 녹음 시작 (%.1f초)", duration_sec)
     recording = sd.rec(
@@ -55,6 +60,7 @@ def _record_blocking(duration_sec: float, sample_rate: int) -> np.ndarray:
         samplerate=sample_rate,
         channels=1,
         dtype="int16",
+        device=settings.stt_mic_device_index,
     )
     sd.wait()  # 녹음이 끝날 때까지 이 스레드 안에서만 대기 (메인 루프는 영향 없음)
     logger.info("마이크 녹음 종료")

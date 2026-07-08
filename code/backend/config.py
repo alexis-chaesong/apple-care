@@ -23,6 +23,7 @@ config.py는 이를 방지하기 위해 모든 설정(ROS 2, FastAPI, DB, 큐 �
 import os
 # 시스템 환경 변수(.env 파일이나 도커 컴포즈에서 넘겨준 값)를 읽어오기 위해 가져옴
 from dataclasses import dataclass, field
+from typing import Optional
 # 파이썬에서 데이터를 저장하는 목적의 클래스를 보일러플레이트(반복되는 코드) 없이 깔끔하게 만들 수 있도록 도와주는 내장 라이브러리
 
 from dotenv import load_dotenv
@@ -206,6 +207,36 @@ class Settings:
     # 각 축 차이가 전부 이 값(mm) 이내면 "같은 사과가 아직 안 치워졌다"고 보고 큐에 넣지 않음.
     # 폴링 방식 특유의 중복 처리 문제(같은 물체를 매 polling마다 새로 감지된 것처럼 착각)를
     # 막기 위한 디바운스 임계값
+
+    # -----------------------------
+    # 음성 정책 명령(웨이크워드) 관련 설정
+    # -----------------------------
+    voice_wakeword_enabled: bool = field(
+        default_factory=lambda: os.getenv("VOICE_WAKEWORD_ENABLED", "false").lower() == "true"
+    )
+    # 개발 PC에는 마이크 장치/openwakeword/tflite 모델이 없을 수 있으므로 기본값 false.
+    # 실제 로봇 배포 환경(.env)에서만 true로 켜서 stt_tts/wakeup_listener.py가 상시
+    # 마이크를 열고 웨이크워드("헬로 로키")를 대기하도록 함
+
+    wakeword_mic_device_index: int = field(
+        default_factory=lambda: int(os.getenv("WAKEWORD_MIC_DEVICE_INDEX", "4"))
+    )
+    # cobot2_ws/voice_processing/MicController.py가 실제 로봇 환경에서 확인해둔 값(4)을
+    # 기본값으로 가져옴. 마이크 장치가 바뀌면 pyaudio.PyAudio().get_device_info_by_index(i)로
+    # 재확인 후 .env의 WAKEWORD_MIC_DEVICE_INDEX만 수정하면 됨
+
+    stt_mic_device_index: Optional[int] = field(
+        default_factory=lambda: (
+            int(os.environ["STT_MIC_DEVICE_INDEX"])
+            if os.getenv("STT_MIC_DEVICE_INDEX") is not None
+            else None
+        )
+    )
+    # stt_service.py(sounddevice)가 쓰는 마이크 장치. wakeword_mic_device_index는
+    # pyaudio(ALSA hw 인덱스) 기준이고 이건 sounddevice(PortAudio) 기준이라 번호 체계가
+    # 다를 수 있음 - scripts/check_mic_level.py로 확인 후 .env의 STT_MIC_DEVICE_INDEX로
+    # 지정. 값이 없으면(None) sounddevice의 시스템 기본 입력 장치를 그대로 사용함
+    # (기존 동작과 동일 - 기본 장치가 맞다면 아무것도 설정할 필요 없음)
 
 # 모듈 전역에서 공유하는 단일 설정 인스턴스.
 # 다른 파일에서는 `from config import settings` 로만 가져다 사용

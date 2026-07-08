@@ -31,6 +31,7 @@ from models import RawFeedbackIn
 from services import llm_service
 from services.llm_service import LLMTimeoutError, LLMParseError, LLMAuthError
 from services.bayesian_policy import get_policy, record_human_feedback, upsert_llm_policy
+from services.voice_policy import run_voice_policy_command
 from robot_bridge import bridge_manager
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,20 @@ async def receive_policy_command(payload: PolicyCommandIn):
         applied.append(updated)
 
     return {"result": "SUCCESS", "raw_text": payload.raw_text, "applied_policies": applied}
+
+
+@router.post("/voice/policy-command", summary="음성으로 정책 명령 입력 (push-to-talk)")
+async def receive_voice_policy_command():
+    """
+    HMI의 '음성으로 정책 입력' 버튼이 호출하는 엔드포인트.
+    웨이크워드로 트리거되는 경우(stt_tts/wakeup_listener.py)와 동일한
+    services.voice_policy.run_voice_policy_command()를 그대로 재사용함 -
+    트리거 방식만 다를 뿐 마이크로 듣고 정책을 저장하는 로직은 완전히 같음.
+    """
+    result = await run_voice_policy_command()
+    if result["result"] != "SUCCESS":
+        raise HTTPException(status_code=422, detail=result)
+    return result
 
 
 class RobotResetRequest(BaseModel):

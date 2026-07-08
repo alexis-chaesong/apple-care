@@ -370,11 +370,18 @@ class HITLStateMachine:
 
     async def _listen_via_stt(self) -> None:
         """STT로 음성을 듣고, 인식되면 submit_answer()로 Future를 채움.
-        HMI 수동 입력이 먼저 도착해 Future가 이미 닫혔다면 조용히 무시됨."""
+        HMI 수동 입력이 먼저 도착해 Future가 이미 닫혔다면 조용히 무시됨.
+
+        mic_lock으로 감싸는 이유: 웨이크워드 대기 루프(wakeup_listener.py)나 음성
+        정책 명령(voice_policy.py)이 동시에 같은 마이크 장치를 열지 못하게 막기
+        위함. 이미 다른 주체가 마이크를 쓰고 있으면 그게 끝날 때까지 대기했다가
+        듣기 시작함 (hitl_response_timeout_sec 안에 안 끝나면 시간 초과로 재질문)."""
         from stt_tts import stt_service  # 지연 import
+        from stt_tts.mic_lock import mic_lock
 
         try:
-            raw = await stt_service.listen_once(timeout_sec=settings.hitl_response_timeout_sec)
+            async with mic_lock:
+                raw = await stt_service.listen_once(timeout_sec=settings.hitl_response_timeout_sec)
             if raw:
                 self.submit_answer(raw)
         except asyncio.CancelledError:

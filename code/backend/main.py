@@ -25,7 +25,9 @@ from robot_bridge import bridge_manager
 from vision_bridge import vision_bridge_manager
 from connection_manager import connection_manager
 from services.decision_planner import decide
+from services.voice_policy import run_voice_policy_command
 from state.hitl_state_machine import hitl_state_machine
+from stt_tts.wakeup_listener import wakeup_listener
 from routers import robot_router, vla_router, hitl_router
 
 
@@ -252,6 +254,12 @@ async def lifespan(app: FastAPI):
         # request.app.state를 통해 큐에 접근할 수 있게 하기 위함 (순환 참조 방지)
         app.state.vision_queue = vision_queue
 
+        # 3-3. 웨이크워드 상시 대기 태스크 가동 (settings.voice_wakeword_enabled=false면
+        # wakeup_listener.start() 내부에서 즉시 반환하고 아무것도 하지 않음).
+        # 웨이크워드 감지 시 voice_policy.run_voice_policy_command()를 그대로 호출해서,
+        # HMI push-to-talk 버튼(hitl_router.py)과 동일한 로직을 공유함
+        wakeup_listener.start(run_voice_policy_command)
+
         print("lifespan startup finished")
 
         yield
@@ -280,6 +288,9 @@ async def lifespan(app: FastAPI):
                 await _vla_consumer_task
             except asyncio.CancelledError:
                 pass
+
+        # 1-2) 웨이크워드 대기 태스크 정리 (pyaudio 스트림/PyAudio 인스턴스 해제)
+        await wakeup_listener.stop()
 
         # 2) ROS spin 스레드 정리 + rclpy.shutdown
         # vision_bridge_manager를 먼저 정리하고(rclpy.shutdown()을 호출하지 않으므로 순서 무관하지만
