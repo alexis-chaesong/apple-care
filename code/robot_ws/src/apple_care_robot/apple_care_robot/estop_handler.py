@@ -71,19 +71,51 @@ RECOVERY_LIFT_MM = 400  # 비상정지 직후 벽/테이블 회피용 최소 상
 RECOVERY_SETTLE_SEC = 1.0  # 완전히 멈춘 다음에도 추가로 더 대기하는 여유 시간(초)
 RECOVERY_POLL_SEC = 0.05  # check_motion()으로 정지 여부를 확인하는 폴링 간격(초)
 
+# amovel/amovej로 이동 명령을 낸 직후, 바로 check_motion()을 확인하면 컨트롤러
+# 내부 상태가 아직 "이동 중"으로 갱신되기 전이라 옛 상태(정지)가 그대로 한 번
+# 읽힐 수 있음(실측 확인된 문제: RECOVERY_LIFT_MM=400mm를 기본 속도 45mm/s로
+# 이동하면 9초 가까이 걸리는데, 실제 로그에서 이 구간이 폴링 0회·1.2초 만에
+# "정지"로 판정된 사례가 나옴 - 로봇이 한창 상승 중인데 다음 이동이 먼저 나가서
+# 겹쳐 보였음). 고정된 초기 대기 시간만으로는 이 레이스를 완전히 막을 수
+# 없다는 게 실측으로 증명됐으므로, "정지"가 연속으로 REQUIRED_IDLE_CONFIRMATIONS
+# 번 확인돼야만 진짜로 멈췄다고 신뢰하는 방식으로 바꿈 - 단발성 오독이 섞여도
+# 다음 확인에서 "이동 중"이 다시 잡히면 카운트가 리셋되므로 구조적으로 안전함.
+REQUIRED_IDLE_CONFIRMATIONS = 3
 
-def _wait_until_fully_stopped(check_motion, wait, settle_sec):
+
+def _wait_until_fully_stopped(check_motion, wait, settle_sec, node=None, label=""):
     """
     이동이 "확실히" 끝날 때까지 기다림. movel/movej는 이론적으로 물리적으로
     끝날 때까지 블록해야 하지만, 고정된 wait(0.3)만으로는 다음 이동이
     위치오차가 아직 다 끝나기도 전에 스케줄되어(블렌딩) 다음과의 의도치 않은
-    충돌하는 문제가 있었음. 그래서 safe_motion.py의 폴링과 동일하게
-    check_motion()이 "정지"를 확인해줄 때까지 직접 반복 확인한 뒤,
-    추가로 settle_sec만큼 한 번 더 여유를 둠.
+    충돌하는 문제가 있었음. check_motion()이 "정지"를 REQUIRED_IDLE_CONFIRMATIONS
+    번 연속으로 확인해줄 때까지 반복 확인한 뒤, 추가로 settle_sec만큼 한 번 더
+    여유를 둠.
+
+    node/label을 넘기면(선택) 폴링 횟수와 실제 걸린 시간을 로그로 남김 -
+    실제 하드웨어에서 상승/이동이 여전히 겹쳐 보이는 문제의 원인을 추측이 아니라
+    확인하기 위함 (폴링이 적게 나오는데도 여전히 겹쳐 보이면 소프트웨어 타이밍이
+    아니라 DSR 컨트롤러 자체의 모션 블렌딩 문제일 가능성으로 좁혀짐).
     """
-    while check_motion():
+    import time as _time
+    start = _time.monotonic()
+
+    poll_count = 0
+    idle_confirmations = 0
+    while idle_confirmations < REQUIRED_IDLE_CONFIRMATIONS:
+        if check_motion():
+            idle_confirmations = 0
+            poll_count += 1
+        else:
+            idle_confirmations += 1
         wait(RECOVERY_POLL_SEC)
     wait(settle_sec)
+
+    if node is not None:
+        elapsed = _time.monotonic() - start
+        node.get_logger().info(
+            f"[E-STOP][{label}] 정지 확인 완료: 폴링 {poll_count}회, 총 {elapsed:.2f}초 소요"
+        )
 
 
 def execute_recovery(
@@ -137,26 +169,26 @@ def execute_recovery(
 
     flush_pos = posx_factory(current_x, current_y, current_z, current_rx, current_ry, current_rz)
     movel(flush_pos)
-    _wait_until_fully_stopped(check_motion, wait, settle_sec)
+    _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="flush")
 
     lifted_pos = posx_factory(
         current_x, current_y, current_z + lift_mm, current_rx, current_ry, current_rz
     )
     node.get_logger().info(f"[E-STOP] 충돌 회피를 위해 {lift_mm}mm 상승합니다.")
     movel(lifted_pos)
-    _wait_until_fully_stopped(check_motion, wait, settle_sec)
+    _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="lift")
 
     movej(home_pos)
-    _wait_until_fully_stopped(check_motion, wait, settle_sec)
+    _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="home")
 
     if plan.action == "RETURN_TO_ORIGIN":
         movel(plan.target_pos)
-        _wait_until_fully_stopped(check_motion, wait, settle_sec)
+        _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="origin")
         if not gripper_open():
             node.get_logger().error("[E-STOP] 원위치 복귀 중 그리퍼 오픈 실패 - 하드웨어 상태를 확인하세요.")
 
     movel(camera_pos)
-    _wait_until_fully_stopped(check_motion, wait, settle_sec)
+    _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="camera")
     node.get_logger().info("[E-STOP] 복구 완료, CAMERA에서 재개")
 
 

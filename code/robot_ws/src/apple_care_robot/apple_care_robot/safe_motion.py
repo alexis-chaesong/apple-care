@@ -25,7 +25,7 @@ safe_motion.py
 
 이 예외(EmergencyStopError)는 일부러 여기서 잡지 않고 그대로 위로 전파해.
 그래야 pick_apple()/force_controlled_place()처럼 safe_movel을 여러 겹 안쪽에서
-호출하는 함수들을 수정하는 고치지 않아도, 맨 위(apple_sorting_cycle.py의
+호출하는 함수들을 수정하는 고치지 않아도, 맨 위(box_sequence_test.py의
 메인 루프)에서 try/except 한 번으로 전체를 잡아서 복구(estop_handler.py의
 check_and_recover)로 넘어갈 수 있음.
 """
@@ -45,7 +45,7 @@ class EmergencyStopError(RuntimeError):
     """비상정지가 감지되어 진행 중이던 동작을 중단했음을 알리는 예외.
 
     safe_movel/safe_movej 안에서 발생하며, 일부러 그 자리에서 잡지 않고
-    호출부(예: apple_sorting_cycle.py의 메인 루프)까지 그대로 전파시켜서
+    호출부(예: box_sequence_test.py의 메인 루프)까지 그대로 전파시켜서
     한 곳에서만 복구 로직을 태우면 되게 만든다.
     """
 
@@ -64,7 +64,7 @@ def stop_motion(node, stop_mode: int = STOP_MODE_HOLD) -> bool:
     조용히 먹통이 되는 위험이 있음.
 
     Args:
-        node: 서비스 클라이언트를 만들 rclpy 노드. apple_sorting_cycle.py에서는
+        node: 서비스 클라이언트를 만들 rclpy 노드. box_sequence_test.py에서는
             DSR 제어용 메인 node가 아니라, 이미 별도 스레드에서 spin 중인
             comm_node를 넘겨야 함 (메인 node를 여기서 또 spin하면 충돌 위험).
         stop_mode: 위 STOP_MODE_* 상수 중 하나.
@@ -129,7 +129,19 @@ def raise_if_emergency_stop(node, emergency_stop_event, stop_motion_fn=stop_moti
 
 def _wait_until_motion_done(node, emergency_stop_event, *, check_motion, wait, stop_motion_fn=stop_motion) -> None:
     """amovel/amovej로 시작한 비동기 이동이 끝날 때까지, 짧은 주기로 비상정지를
-    감시하며 동기화하는 공용 폴링 루프 (safe_movel/safe_movej가 함께 사용)."""
+    감시하며 동기화하는 공용 폴링 루프 (safe_movel/safe_movej가 함께 사용).
+
+    amovel/amovej 호출 직후 곧바로 check_motion()을 확인하면, 컨트롤러 내부
+    상태가 아직 "이동 중"으로 갱신되기 전이라 옛 상태(정지)가 잠깐 그대로
+    읽혀서 while 루프가 0번 만에 빠져나가버릴 수 있음 - 그러면 실제로는 아직
+    한참 진행 중인 이동인데 이 함수가 "끝났다"고 착각하고 바로 리턴해서, 호출부가
+    곧바로 다음 이동을 시작해 진행 중이던 이번 이동과 겹치는(블렌딩) 문제가
+    있었음 (estop_handler.py의 복구 이동에서 실제로 겪은 문제와 동일한 원인).
+    그래서 폴링을 시작하기 전에 짧게 먼저 대기해서 "이동 중" 상태가 확실히
+    반영된 뒤부터 확인하게 함 (force_place.py가 amovel 직후 time.sleep(0.1)을
+    두는 것과 동일한 이유).
+    """
+    wait(0.1)
     while check_motion():
         raise_if_emergency_stop(node, emergency_stop_event, stop_motion_fn=stop_motion_fn)
         wait(0.01)
@@ -155,7 +167,7 @@ def safe_movel(
 
     amovel/check_motion/wait을 인자로 주입받는 이유: 실제 DSR_ROBOT2 하드웨어
     없이도(가짜 함수로) 이 폴링/예외 로직 자체를 테스트할 수 있게 하기 위함
-    (실제 사용 시에는 apple_sorting_cycle.py가 DSR_ROBOT2.amovel/check_motion/wait을
+    (실제 사용 시에는 box_sequence_test.py가 DSR_ROBOT2.amovel/check_motion/wait을
     그대로 넘겨줌).
     """
     amovel(target, vel=vel, acc=acc, ref=ref)

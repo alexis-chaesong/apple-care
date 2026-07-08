@@ -2,7 +2,7 @@
 Gripper Open/Close (OnRobot RG2, Modbus/TCP 직접 제어)
 =========================================================
 
-box_sequence_test.py / apple_sorting_cycle.py 등에서
+box_sequence_test.py 등에서
     from apple_care_robot.openclose import gripper_open, gripper_close
 형태로 가져다 씀.
 

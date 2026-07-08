@@ -5,8 +5,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from apple_care_robot.estop_handler import (
     EstopRecoveryTracker, execute_recovery, check_and_recover,
-    RECOVERY_LIFT_MM, RECOVERY_SETTLE_SEC,
+    RECOVERY_LIFT_MM, RECOVERY_SETTLE_SEC, RECOVERY_POLL_SEC,
 )
+
+# check_motion=lambda: False(항상 "정지")인 테스트에서, _wait_until_fully_stopped가
+# REQUIRED_IDLE_CONFIRMATIONS(3)번 연속 확인 후 빠져나가므로 매 구간마다
+# RECOVERY_POLL_SEC 대기가 3번 찍히고 그다음 RECOVERY_SETTLE_SEC이 한 번 찍힘.
+_IDLE_WAITS = [("wait", RECOVERY_POLL_SEC)] * 3 + [("wait", RECOVERY_SETTLE_SEC)]
 
 
 # ── EstopRecoveryTracker: 상태 추적 + 복구 계획 결정 ──────────────────────
@@ -144,7 +149,9 @@ def test_execute_recovery_lifts_up_from_current_position_after_flush():
     )
 
     lifted_pos = (100.0, 200.0, 50.0 + RECOVERY_LIFT_MM, 10.0, 20.0, 30.0)  # z만 +RECOVERY_LIFT_MM
-    assert calls[2] == ("movel", lifted_pos)
+    # calls[0]=flush movel, calls[1:5]=flush 구간의 _wait_until_fully_stopped가
+    # 남기는 4번의 wait(_IDLE_WAITS) 다음이 상승 이동임.
+    assert calls[len(_IDLE_WAITS) + 1] == ("movel", lifted_pos)
 
 
 def test_execute_recovery_return_to_origin_moves_flush_then_lift_then_home_then_origin_then_camera():
@@ -172,16 +179,16 @@ def test_execute_recovery_return_to_origin_moves_flush_then_lift_then_home_then_
     lifted_pos = (100.0, 200.0, 50.0 + RECOVERY_LIFT_MM, 10.0, 20.0, 30.0)
     assert calls == [
         ("movel", flush_pos),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movel", lifted_pos),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movej", "HOME"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movel", "PICK_POS_1"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("gripper_open",),
         ("movel", "CAMERA"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
     ]
 
 
@@ -209,13 +216,13 @@ def test_execute_recovery_resume_at_camera_skips_origin_and_gripper():
     lifted_pos = (100.0, 200.0, 50.0 + RECOVERY_LIFT_MM, 10.0, 20.0, 30.0)
     assert calls == [
         ("movel", flush_pos),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movel", lifted_pos),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movej", "HOME"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movel", "CAMERA"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
     ]
 
 
@@ -311,16 +318,16 @@ def test_check_and_recover_runs_recovery_and_clears_event_when_triggered():
     assert event.is_set() is False  # 리셋되어야 다음 루프에서 또 걸림
     assert calls == [
         ("movel", flush_pos),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movel", lifted_pos),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movej", "HOME"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movel", "PICK_POS_1"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("gripper_open",),
         ("movel", "CAMERA"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
     ]
     # 원위치에 내려놨으니 이제 정상 상태로 리셋되어야 함
     assert tracker.get_recovery_plan().action == "RESUME_AT_CAMERA"
@@ -361,13 +368,48 @@ def test_check_and_recover_when_not_holding_skips_origin_and_resumes_at_camera()
     assert triggered is True
     assert calls == [
         ("movel", flush_pos),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movel", lifted_pos),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movej", "HOME"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
         ("movel", "CAMERA"),
-        ("wait", RECOVERY_SETTLE_SEC),
+        *_IDLE_WAITS,
     ]
     assert ("READY", None) in status_bus.states
     assert False in status_bus.gripper_statuses
+
+
+# ── check_motion()의 단발성 오독(레이스 컨디션) 회귀 테스트 ──────────────────
+# 실제 하드웨어에서 관찰된 문제: amovel 직후 check_motion()이 컨트롤러 내부
+# 상태가 아직 갱신되기 전이라 "정지"로 잘못 읽힌 뒤(False), 그다음 폴링에서는
+# 제대로 "이동 중"(True)으로 나오는 경우가 있었음. 단순히 첫 확인만 믿으면
+# 로봇이 한창 이동 중인데도 "멈췄다"고 착각하게 됨 - REQUIRED_IDLE_CONFIRMATIONS
+# 연속 확인 방식이 이런 단발성 오독에 흔들리지 않는지 검증함.
+
+def test_wait_until_fully_stopped_ignores_single_false_reading_from_check_motion():
+    from apple_care_robot.estop_handler import _wait_until_fully_stopped
+
+    # 순서: False(오독) -> True -> True -> False -> False -> False(진짜 정지)
+    # 첫 False만 믿고 바로 빠져나가면 안 되고, 그 뒤 True가 나오면 연속 카운트가
+    # 리셋되어 다시 3번 연속 False가 나올 때까지 기다려야 함.
+    responses = iter([False, True, True, False, False, False])
+    poll_calls = []
+
+    def fake_check_motion():
+        try:
+            value = next(responses)
+        except StopIteration:
+            value = False
+        poll_calls.append(value)
+        return value
+
+    waits = []
+    _wait_until_fully_stopped(
+        fake_check_motion, lambda sec: waits.append(sec), settle_sec=1.0,
+    )
+
+    # check_motion이 실제로 True를 반환한 뒤에도(2,3번째) 계속 확인했어야 함 -
+    # 즉 최소 6번(오독 1 + True 2 + 진짜 정지 확인 3)은 폴링했어야 정상
+    assert len(poll_calls) >= 6
+    assert poll_calls[-3:] == [False, False, False]

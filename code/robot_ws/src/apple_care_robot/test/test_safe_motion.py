@@ -73,7 +73,10 @@ def test_safe_movel_starts_amovel_with_target_and_kwargs():
         vel=30, acc=20, ref="BASE",
     )
 
-    assert calls == [("amovel", "TARGET_POS", 30, 20, "BASE")]
+    # amovel 호출 직후 폴링 시작 전 짧게 한 번 더 대기함 (check_motion()이
+    # "이동 중" 상태로 갱신되기 전에 잘못 "정지"로 읽히는 걸 방지 - safe_motion.py
+    # 참고). check_motion=False라 폴링 루프 자체는 안 돌고 이 초기 대기만 찍힘.
+    assert calls == [("amovel", "TARGET_POS", 30, 20, "BASE"), ("wait", 0.1)]
 
 
 def test_safe_movel_completes_normally_when_motion_finishes():

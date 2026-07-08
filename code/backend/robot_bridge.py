@@ -363,7 +363,22 @@ class RobotBridgeManager:
         print(f"[ROS2 /robot/process_state 수신]: {msg.data}", flush=True)
 
         state, message = _split_colon(msg.data)
+        previous_state = self.latest_process_state
         self.latest_process_state = state
+
+        if previous_state == "ERROR" and state == "READY":
+            # E-STOP 복구가 막 끝나고 처음 READY로 돌아온 시점. estop_handler.py의
+            # RETURN_TO_ORIGIN 복구는 사과를 "원래 집었던 바로 그 위치"에 그대로
+            # 다시 내려놓는데, vision_bridge.py의 디바운스(_is_duplicate)는
+            # status+position이 직전과 같으면 "이미 처리한 물체"로 보고 재감지
+            # 자체를 건너뜀 - 그래서 로봇이 READY로 복귀해도 새 decision이 영원히
+            # 안 와서 카메라 위치에 멈춰있는 것처럼 보이는 문제가 있었음(실제로
+            # 겪은 문제). 복구 직후에는 반드시 디바운스를 강제로 초기화해서
+            # 그 사과가 다시 평가되게 함.
+            from vision_bridge import vision_bridge_manager
+            vision_bridge_manager.force_redetect()
+            logger.info("E-STOP 복구 감지(ERROR->READY) - Vision 디바운스 상태 초기화")
+
         status_text = message if message else STATE_KO_MAP.get(state, state)
 
         payload = {
