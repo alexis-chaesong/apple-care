@@ -188,10 +188,27 @@ class VLASorterDashboard:
 
         elif msg_type == "HITL_RESOLVED":
             payload = msg.get("payload", {}) or {}
+            fruit_type = payload.get('fruit_type')
+            destination = payload.get('destination')
             self.log_message(
-                f"[HITL_RESOLVED] 해결됨: {payload.get('fruit_type')} → {payload.get('destination')} "
+                f"[HITL_RESOLVED] 해결됨: {fruit_type} → {destination} "
                 f"(condition={payload.get('condition')}, confidence={payload.get('confidence')})"
             )
+
+            # VLA_DECISION(자동 판정)과 동일하게, 사람이 확정한 매핑도 카운트에 반영
+            category = DESTINATION_TO_CATEGORY.get(destination)
+            if category is not None:
+                self.counts[category] = self.counts.get(category, 0) + 1
+                if category in self.count_labels:
+                    self.count_labels[category].config(text=f"{self.counts[category]} 개")
+
+            # 매핑 완료를 사람이 직접 확인하도록 안내 창을 띄우고, "확인"을 눌러야
+            # 팝업이 닫히게 함 (messagebox.showinfo는 사용자가 닫을 때까지 블로킹됨).
+            messagebox.showinfo(
+                "매핑 완료",
+                f"'{fruit_type}'을(를) [{category or destination}]로 매핑 완료했습니다.",
+            )
+
             if self.hitl_popup is not None:
                 try:
                     if self.hitl_popup.winfo_exists():
@@ -213,6 +230,31 @@ class VLASorterDashboard:
                 f"자동 재질문 실패, 수동 개입 필요: {fruit_type}\n"
                 "로봇/시스템 제어 탭에서 강제 복구가 필요합니다.",
             )
+
+        elif msg_type == "PROCESS_STATE":
+            # StatusBus.set_state()가 로봇 쪽에서 발행 -> robot_bridge.py가 그대로
+            # 중계. 특히 check_and_recover()가 비상정지 복구 완료 시 "MOVING"을
+            # 다시 보내주므로, 로봇이 이미 자동 재개된 걸 여기서 실시간으로 볼 수 있음
+            # (오버레이 화면을 직접 닫아주지는 않음 - 그건 사람이 버튼으로 확인).
+            status_text = msg.get("payload", "")
+            if any(k in status_text for k in ["오류", "실패", "emergency", "ERROR"]):
+                color = self.COLOR_RED
+            elif any(k in status_text for k in ["완료", "RUNNING", "이동", "구동", "MOVING"]):
+                color = self.COLOR_GREEN
+            else:
+                color = self.COLOR_TEXT_MUTED
+            self.status_label.config(text=f"SYSTEM STATUS: {status_text}", fg=color)
+            self.log_message(f"[PROCESS_STATE] {status_text}")
+
+        elif msg_type == "MOTION_STATUS":
+            motion = msg.get("motion", "")
+            message = msg.get("message", "")
+            self.log_message(f"[MOTION_STATUS] {motion}" + (f" - {message}" if message else ""))
+
+        elif msg_type == "SAFETY_EVENT":
+            error_code = msg.get("error_code", "")
+            error_msg = msg.get("error_msg", "")
+            self.log_message(f"[SAFETY_EVENT] {error_code}: {error_msg}")
 
         elif msg_type == "CAMERA_FRAME":
             try: 
@@ -805,16 +847,20 @@ class VLASorterDashboard:
         title_lbl = tk.Label(overlay, text="EMERGENCY INTERLOCK ACTIVATED", font=("DejaVu Sans Mono", 22, "bold"), fg="white", bg=self.COLOR_EMERGENCY_BG)
         title_lbl.place(relx=0.5, rely=0.45, anchor="center") 
 
-        sub_lbl = tk.Label( 
-            overlay, text="모든 로봇 액추에이터 및 컨베이어 벨트 컨텍스트 전원이 물리 차단되었습니다.\n현장 안전을 확인한 후 복구 프로세스를 시작하세요.", 
+        sub_lbl = tk.Label(
+            overlay, text=(
+                "로봇은 정지 후 스스로 안전 위치로 내려놓고 자동으로 카메라 위치에서 작업을 재개합니다.\n"
+                "이 화면은 알림용이며, 아래 버튼은 로봇 동작과 무관하게 이 화면만 닫습니다.\n"
+                "실제로 로봇이 재개됐는지는 상단 SYSTEM STATUS와 시스템 로그에서 확인하세요."
+            ),
             font=self.FONT_BODY_BOLD, fg="#ffccd2", bg=self.COLOR_EMERGENCY_BG, justify="center"
-        ) 
-        sub_lbl.place(relx=0.5, rely=0.55, anchor="center") 
+        )
+        sub_lbl.place(relx=0.5, rely=0.55, anchor="center")
 
-        btn_reset = tk.Button( 
-            overlay, text="안전 확인 완료 - 원래 상태로 복구 (정상 홈 화면)", font=self.FONT_BODY_BOLD, bg=self.COLOR_RED, fg="white", 
-            activebackground="white", activeforeground=self.COLOR_EMERGENCY_BG, bd=0, relief="flat", padx=25, pady=12, cursor="hand2", command=self._clear_emergency_overlay, 
-        ) 
+        btn_reset = tk.Button(
+            overlay, text="확인했습니다 - 화면 닫기 (로봇 동작에는 영향 없음)", font=self.FONT_BODY_BOLD, bg=self.COLOR_RED, fg="white",
+            activebackground="white", activeforeground=self.COLOR_EMERGENCY_BG, bd=0, relief="flat", padx=25, pady=12, cursor="hand2", command=self._clear_emergency_overlay,
+        )
         btn_reset.place(relx=0.5, rely=0.68, anchor="center") 
 
         overlay.lift() 
