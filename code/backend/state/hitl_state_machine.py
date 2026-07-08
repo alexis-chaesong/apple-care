@@ -317,6 +317,14 @@ class HITLStateMachine:
         질문 1회 던지고 답을 기다려 해석/저장까지 시도.
         성공(RESUME까지 완료)하면 True, 실패(재질문 필요)하면 False 반환.
         """
+        # 답변 Future를 질문 생성/TTS보다 먼저 만들어둠. VLA_ASK_HUMAN 브로드캐스트는
+        # _run_session()에서 이미 TTS보다 훨씬 먼저 나가서 HMI 팝업이 즉시 뜨는데,
+        # 이 Future가 TTS가 다 끝난 뒤에야 생기면 사람이 팝업을 보자마자(TTS가 아직
+        # 재생 중일 때) 버튼을 눌렀을 때 submit_answer()가 "아직 답변 대기 중이 아님"으로
+        # 판단해 무조건 409를 반환하는 문제가 있었음 (실제로 겪은 버그 - HMI에서
+        # 팝업 누르면 오류가 뜸). 미리 만들어두면 ASKING 단계에서 답이 와도 그대로 받힘.
+        self._answer_future = asyncio.get_event_loop().create_future()
+
         # 1) 질문 생성 및 TTS 출력
         session.state = HITLState.ASKING
         try:
@@ -329,11 +337,15 @@ class HITLStateMachine:
             question = f"{session.fruit_type} 처리 방법을 확인해 주세요. 정상, 가공, 폐기 중 선택해 주세요."
 
         from stt_tts import tts_service  # 지연 import: 순환 참조 방지 및 아직 미구현 상태 대비
-        await tts_service.speak(question)
+
+        # TTS가 재생되는 동안에도 이미 위에서 만들어둔 Future가 답을 받을 수 있으므로,
+        # HMI에서 TTS보다 먼저 버튼을 눌러도 더 이상 유실되지 않음. 단, 이 시점에
+        # 이미 답이 와서 Future가 끝나 있으면 굳이 TTS를 끝까지 들려줄 필요 없음.
+        if not self._answer_future.done():
+            await tts_service.speak(question)
 
         # 2) 답변 대기 (STT 백그라운드 + 수동 입력 동시 대기)
         session.state = HITLState.LISTENING
-        self._answer_future = asyncio.get_event_loop().create_future()
         stt_task = asyncio.create_task(self._listen_via_stt())
 
         try:

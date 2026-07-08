@@ -80,7 +80,9 @@ from apple_care_robot.force_place import (
 )
 from apple_care_robot.openclose import gripper_open
 from apple_care_robot.status_bus import StatusBus
-from apple_care_robot.vision_transform import camera_to_base, SMALL_APPLE_DEPTH_OFFSET_MM
+from apple_care_robot.vision_transform import (
+    camera_to_base, SMALL_APPLE_DEPTH_OFFSET_MM, UNKNOWN_FRUIT_DEPTH_OFFSET_MM,
+)
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
@@ -106,6 +108,20 @@ MAX_PICK_ATTEMPTS = 3
 VISION_SERVICE_NAME = "/get_apple_status"
 
 DESTINATION_TO_BOX = {}  # main()에서 채움: destination -> (box_name, box_pos, way_pos, has_existing_apple)
+
+
+def _depth_offset_for_condition(condition):
+    """
+    condition("small"/"unknown"/그 외)에 따라 camera_to_base()에 넘길
+    depth_offset_mm을 고름. 작은 사과와 미확인 과일은 서로 다른 상수를 쓰므로
+    (크기를 전혀 모르는 unknown을 작은 사과와 같은 값으로 묶어두지 않고, 나중에
+    실측으로 각자 독립적으로 튜닝할 수 있게 함) 항상 이 함수를 통해서만 결정함.
+    """
+    if condition == "small":
+        return SMALL_APPLE_DEPTH_OFFSET_MM
+    if condition == "unknown":
+        return UNKNOWN_FRUIT_DEPTH_OFFSET_MM
+    return None
 
 
 def pick_apple(node, pick_pos):
@@ -209,7 +225,7 @@ def main(args=None):
             return None
 
         camera_pose_at_detection = get_current_posx()[0]
-        depth_offset = SMALL_APPLE_DEPTH_OFFSET_MM if condition == "small" else None
+        depth_offset = _depth_offset_for_condition(condition)
         bx, by, bz = camera_to_base(position, camera_pose_at_detection, depth_offset_mm=depth_offset)
         node.get_logger().info(
             f"위치 재획득: camera={position} -> base=({bx:.2f}, {by:.2f}, {bz:.2f})"
@@ -317,7 +333,7 @@ def main(args=None):
         # 작은 사과는 몸통이 낮아서 일반 오프셋만큼 내려가면 트레이/받침대와
         # 충돌하므로, condition="small"일 때만 덜 내려가는 전용 오프셋을 씀
         # (box_sequence_test.py에서 포팅).
-        depth_offset = SMALL_APPLE_DEPTH_OFFSET_MM if condition == "small" else None
+        depth_offset = _depth_offset_for_condition(condition)
 
         if pose:
             # pose는 카메라 좌표계 -> 로봇이 현재 서 있는(=CAMERA에서 감지된
