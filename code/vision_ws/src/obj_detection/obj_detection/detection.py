@@ -19,11 +19,11 @@ detection.py
        depth 검증이 계속 안전장치 역할을 함.)
     3) confidence가 너무 낮으면 "unknown", 박스 자체가 없으면 depth로 물체
        유무만 봐서 "unknown"(뭔가 있음) 또는 "empty"(트레이 빔)로 답한다.
-    4) apple_normal/apple_damaged로 판정된 것들은 depth로 잰 실제 지름(mm)을
-       최근 정상 사과들의 평균과 비교해서, 확연히 작으면 "apple_small"로
+    4) apple_normal/apple_damaged로 판정된 것들은 depth로 잰 실제 지름(mm)이
+       ABSOLUTE_SMALL_DIAMETER_MM 이하로 확연히 작으면 "apple_small"로
        재분류한다. -> _classify_size / _real_world_diameter_mm
-       (YOLO가 apple_small을 직접 학습했지만, 이건 "같은 트레이의 다른 사과들에
-       비해 상대적으로 작은지"를 depth 실측으로 다시 확인하는 이중 안전망)
+       (YOLO가 apple_small을 직접 학습했지만, 이건 depth 실측으로 "진짜
+       물리적으로 작은지"를 다시 확인하는 이중 안전망)
 
 이 파일에는 ROS2 노드 본체(초기화, get_apple_status 서비스 콜백, 종료)만 있고,
 실제 로직은 mixin 3개로 나뉘어 있다 (파일이 너무 길어져서 분리함):
@@ -39,7 +39,6 @@ detection.py
 
 import threading
 import time
-from collections import deque
 
 import cv2
 import numpy as np
@@ -54,7 +53,7 @@ from apple_care_msgs.srv import SrvAppleStatus
 from obj_detection.realsense import ImgNode
 from obj_detection.yolo import AppleStatusModel, MIN_KNOWN_CONFIDENCE
 from obj_detection.depth_utils import DepthAnalysisMixin, HEIGHT_DIFF_MARGIN_MM
-from obj_detection.size_classifier import SizeClassifierMixin, NORMAL_SIZE_HISTORY_LEN
+from obj_detection.size_classifier import SizeClassifierMixin
 from obj_detection.debug_overlay import DebugOverlayMixin, DEBUG_IMAGE_PERIOD_SEC
 
 # YOLO confidence가 이 값 이상이면, 박스가 depth 높이차 검증(_box_ring_depths)에
@@ -93,11 +92,6 @@ class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayM
         # 각 픽셀을 자기 자신의 캘리브레이션 값과 비교한다 (자세한 이유는
         # depth_utils.py의 BACKGROUND_DISTANCE_MM 주석/_calibrate_scene 참고).
         self.background_distance_mm, self.background_depth_map = self._calibrate_scene()
-        self._normal_apple_sizes = deque(maxlen=NORMAL_SIZE_HISTORY_LEN)
-        # _normal_apple_sizes는 서비스 콜백 스레드(handle_get_status, 1초에 1개)와
-        # 뎁스 디버그 스레드(_draw_all_detections, 20Hz 다중 박스)가 동시에 쓰기/읽기
-        # 하므로 락으로 보호한다.
-        self._normal_sizes_lock = threading.Lock()
         # handle_get_status가 최근에 어떤 근거로 판정했는지(박스/뎁스 값/최종 라벨)를
         # 뎁스 디버그 창에 그려주기 위한 공유 상태. 서비스 콜백 스레드와 디버그 창
         # 스레드가 서로 다르므로 락으로 보호한다.
@@ -144,7 +138,7 @@ class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayM
         debug_info = {
             'raw_box': box, 'raw_label': label, 'score': score,
             'inner_depth': None, 'ring_depth': None, 'height_diff': None,
-            'depth_ok': None, 'diameter_mm': None, 'avg_diameter_mm': None,
+            'depth_ok': None, 'diameter_mm': None,
             'final_status': None,
         }
 
