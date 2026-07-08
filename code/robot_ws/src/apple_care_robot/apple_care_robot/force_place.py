@@ -10,6 +10,8 @@ Force-based Placing (최종 통합본 - 노션 백업용)
 
 import time
 
+from apple_care_robot.safe_motion import raise_if_emergency_stop
+
 DOWN_SPEED_VEL = 30        # 내려가는 속도 (mm/s)
 DOWN_SPEED_ACC = 20        # 가속도
 MAX_DOWN_DISTANCE = 150    # 접촉을 못 찾았을 때 최대 몇 mm까지 내려갈지 (안전 마진 확보)
@@ -46,7 +48,10 @@ STALL_TIME_SEC = 2.0        # z가 이 시간(초) 이상 거의 안 움직이�
 STALL_Z_EPSILON_MM = 0.5    # 이 이하의 z 변화는 "안 움직임"으로 취급 (컨트롤러/센서 노이즈 감안)
 
 
-def force_controlled_place(node, current_pos, force_threshold=FORCE_THRESHOLD):
+def force_controlled_place(
+    node, current_pos, force_threshold=FORCE_THRESHOLD,
+    *, emergency_stop_event=None, stop_node=None,
+):
     """
     현재 위치에서 수직으로 내려가다가 바닥 감지 시 멈추는 함수
 
@@ -55,9 +60,21 @@ def force_controlled_place(node, current_pos, force_threshold=FORCE_THRESHOLD):
         current_pos: 하강을 시작할 현재 위치 (posx 타입)
         force_threshold: 접촉으로 판단할 힘 변화량 임계값 (N).
             이미 사과가 있는 박스는 EXISTING_APPLE_FORCE_THRESHOLD를 넘겨서 호출.
+        emergency_stop_event: 넘겨주면(threading.Event), 하강 힘제어 루프 중에도
+            비상정지를 감시함 - 걸려 있으면 즉시 하드웨어 정지 후
+            safe_motion.EmergencyStopError를 던짐 (호출부가 잡아서 복구해야 함).
+            None이면(기본값) 기존과 동일하게 비상정지를 감시하지 않음 - 이 호출
+            경로에 /robot/command 연동이 없는 호출부에서의 하위 호환을 위함.
+        stop_node: emergency_stop_event를 쓸 때, motion/move_stop 서비스 클라이언트를
+            만들 rclpy 노드 (보통 comm_node). 안 주면 node를 그대로 사용.
 
     Returns:
         bool: True면 접촉 성공, False면 타임아웃 또는 실패
+
+    Raises:
+        EmergencyStopError: emergency_stop_event가 힘제어 도중 걸리면 발생.
+            아래 finally 블록의 예외 안전 처리는 그대로 실행되므로, 하강 목표
+            취소(amovel)와 컴플라이언스 모드 해제 둘 다 이 경우에도 정상 수행됨.
     """
     from DSR_ROBOT2 import (
         amovel, posx, get_current_posx,
@@ -162,6 +179,13 @@ def force_controlled_place(node, current_pos, force_threshold=FORCE_THRESHOLD):
                         f'안 움직여 접촉으로 간주합니다 (z={current_z:.2f}mm).'
                     )
                     break
+
+            # 하강 도중에도 비상정지를 감시함 (emergency_stop_event가 넘어온
+            # 경우에만). 걸리면 raise_if_emergency_stop이 실제 하드웨어 정지를
+            # 요청하고 EmergencyStopError를 던짐 - 아래 finally가 그래도 실행되어
+            # 하강 목표 취소/모드 해제는 정상적으로 이뤄짐.
+            if emergency_stop_event is not None:
+                raise_if_emergency_stop(stop_node or node, emergency_stop_event)
 
             time.sleep(0.01)
     finally:

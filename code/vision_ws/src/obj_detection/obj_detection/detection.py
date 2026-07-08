@@ -17,9 +17,13 @@ detection.py
        "unknown"으로 새는 문제가 있었음 - YOLO가 이미 확신하는 경우까지 depth로
        다시 의심할 필요는 없다는 판단. confidence가 애매한 경우는 기존처럼
        depth 검증이 계속 안전장치 역할을 함.)
-    3) confidence가 너무 낮으면 "unknown", 박스 자체가 없으면 depth로 물체
+    3) 위 검증(들)을 통과해도 실측 지름이 MAX_PLAUSIBLE_APPLE_DIAMETER_MM을
+       넘으면 버린다 - 박스(용기)의 테두리/모서리는 바닥보다 실제로 튀어나와
+       있어서 2)의 depth 검증을 정상적으로 통과해버릴 수 있는데, 사과보다
+       훨씬 크므로 이 실측 크기 검사로 걸러낸다.
+    4) confidence가 너무 낮으면 "unknown", 박스 자체가 없으면 depth로 물체
        유무만 봐서 "unknown"(뭔가 있음) 또는 "empty"(트레이 빔)로 답한다.
-    4) apple_normal/apple_damaged로 판정된 것들은 depth로 잰 실제 지름(mm)이
+    5) apple_normal/apple_damaged로 판정된 것들은 depth로 잰 실제 지름(mm)이
        ABSOLUTE_SMALL_DIAMETER_MM 이하로 확연히 작으면 "apple_small"로
        재분류한다. -> _classify_size / _real_world_diameter_mm
        (YOLO가 apple_small을 직접 학습했지만, 이건 depth 실측으로 "진짜
@@ -61,6 +65,16 @@ from obj_detection.debug_overlay import DebugOverlayMixin, DEBUG_IMAGE_PERIOD_SE
 # 높이 자체가 작은 물체는 이 검증에 자주 걸려 "unknown"으로 새는 문제가 있었음.
 # YOLO_TRUST_CONFIDENCE보다 낮은 confidence는 여전히 기존처럼 depth 검증을 거침.
 YOLO_TRUST_CONFIDENCE = 0.7
+
+# 박스(정상적으로 사과보다 훨씬 큰 물리적 용기)의 테두리/모서리는 바닥보다 실제로
+# 튀어나와 있어서, YOLO가 그 자리에 박스 하나를 잘못 그리면(오탐) 위 높이차
+# 검증이나 YOLO_TRUST_CONFIDENCE 우회 둘 다 "진짜 튀어나온 물체"로 정상 통과
+# 시켜버린다. 사과는 물리적으로 이보다 훨씬 작으므로, depth 실측 지름
+# (_real_world_diameter_mm)이 이 값을 넘으면 라벨이 뭐든/confidence가 얼마든
+# "사과가 아니라 박스/트레이 구조물을 잘못 잡은 것"으로 보고 버린다.
+# (정상 사과는 대략 70~80mm대 - size_classifier.py 참고. 측정 오차 여유를 크게
+# 둬도 사과 하나가 이 값을 넘을 일은 없음)
+MAX_PLAUSIBLE_APPLE_DIAMETER_MM = 120
 
 
 class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayMixin, Node):
@@ -167,6 +181,24 @@ class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayM
                         "difference -> ignoring box"
                     )
                     box = None
+
+        if box is not None:
+            # 높이차 검증을 정상 통과했든 confidence로 우회했든, 마지막으로
+            # "이게 물리적으로 사과 크기가 맞는지"를 한 번 더 본다. 박스(용기)의
+            # 테두리/모서리는 바닥보다 실제로 튀어나와 있어서 위 depth 검증들을
+            # 통과해버릴 수 있는데, 사과보다 훨씬 큰 실측 지름으로 바로 구분된다.
+            plausibility_diameter_mm = self._real_world_diameter_mm(depth_frame, box)
+            if (
+                plausibility_diameter_mm is not None
+                and plausibility_diameter_mm > MAX_PLAUSIBLE_APPLE_DIAMETER_MM
+            ):
+                self.get_logger().info(
+                    f"YOLO detected '{label}' (score={score:.2f}) but real-world size "
+                    f"({plausibility_diameter_mm:.0f}mm) exceeds any apple "
+                    f"(> {MAX_PLAUSIBLE_APPLE_DIAMETER_MM}mm) -> likely box/tray structure, "
+                    "ignoring box"
+                )
+                box = None
 
         if box is None:
             # 박스가 없거나(원래 없었거나 높이 차이 검증에서 탈락) -> YOLO는 놓쳤어도
