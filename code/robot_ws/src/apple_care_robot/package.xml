@@ -2,14 +2,18 @@
 <package format="3">
   <name>apple_care_robot</name>
   <version>0.0.1</version>
-  <description>Apple_Care - Motion Planner & Robot Controller nodes</description>
+  <description>Apple_Care - Motion Planner &amp; Robot Controller nodes</description>
   <maintainer email="you@example.com">your_name</maintainer>
   <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>ament_index_python</depend>
+  <depend>apple_care_msgs</depend>
   <exec_depend>python3-pymodbus</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

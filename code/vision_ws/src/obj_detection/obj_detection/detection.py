@@ -11,6 +11,12 @@ detection.py
     2) 그 박스가 진짜 물체인지 depth로 재검증한다 - 박스 안쪽이 바로 바깥
        배경보다 확실히 튀어나와 있어야 통과 (사진/그림자 등 오탐 방지).
        -> _box_ring_depths
+       단, YOLO confidence가 YOLO_TRUST_CONFIDENCE 이상으로 충분히 높으면 이
+       depth 검증을 건너뛰고 YOLO 결과를 그대로 신뢰한다. (작은 사과처럼
+       배경 대비 튀어나온 높이 자체가 작은 물체는 이 depth 검증에 자주 걸려서
+       "unknown"으로 새는 문제가 있었음 - YOLO가 이미 확신하는 경우까지 depth로
+       다시 의심할 필요는 없다는 판단. confidence가 애매한 경우는 기존처럼
+       depth 검증이 계속 안전장치 역할을 함.)
     3) confidence가 너무 낮으면 "unknown", 박스 자체가 없으면 depth로 물체
        유무만 봐서 "unknown"(뭔가 있음) 또는 "empty"(트레이 빔)로 답한다.
     4) apple_normal/apple_damaged로 판정된 것들은 depth로 잰 실제 지름(mm)을
@@ -50,6 +56,13 @@ from obj_detection.yolo import AppleStatusModel, MIN_KNOWN_CONFIDENCE
 from obj_detection.depth_utils import DepthAnalysisMixin, HEIGHT_DIFF_MARGIN_MM
 from obj_detection.size_classifier import SizeClassifierMixin, NORMAL_SIZE_HISTORY_LEN
 from obj_detection.debug_overlay import DebugOverlayMixin, DEBUG_IMAGE_PERIOD_SEC
+
+# YOLO confidence가 이 값 이상이면, 박스가 depth 높이차 검증(_box_ring_depths)에
+# 실패해도 depth 검증을 건너뛰고 YOLO 결과를 그대로 신뢰한다. depth 검증은 원래
+# 사진/그림자 같은 오탐을 막기 위한 안전장치인데, small 사과처럼 배경 대비 튀어난
+# 높이 자체가 작은 물체는 이 검증에 자주 걸려 "unknown"으로 새는 문제가 있었음.
+# YOLO_TRUST_CONFIDENCE보다 낮은 confidence는 여전히 기존처럼 depth 검증을 거침.
+YOLO_TRUST_CONFIDENCE = 0.7
 
 
 class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayMixin, Node):
@@ -147,11 +160,21 @@ class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayM
                 debug_info['depth_ok'] = False
 
             if not debug_info['depth_ok']:
-                # YOLO는 박스를 찾았지만, 주변 배경과 높이(깊이) 차이가 없음 -> 실제 물체로 보지 않음
-                self.get_logger().info(
-                    f"YOLO detected '{label}' but no depth height difference -> ignoring box"
-                )
-                box = None
+                if score >= YOLO_TRUST_CONFIDENCE:
+                    # YOLO가 이 정도로 확신하면, depth 높이차 검증(작은 사과에서
+                    # 자주 걸림)에 실패해도 YOLO 결과를 그대로 믿고 진행한다.
+                    self.get_logger().info(
+                        f"YOLO detected '{label}' (score={score:.2f}) with weak depth "
+                        f"height difference, but confidence >= {YOLO_TRUST_CONFIDENCE} "
+                        "-> trusting YOLO anyway"
+                    )
+                else:
+                    # confidence도 애매하고 depth 검증도 실패 -> 실제 물체로 보지 않음
+                    self.get_logger().info(
+                        f"YOLO detected '{label}' (score={score:.2f}) but no depth height "
+                        "difference -> ignoring box"
+                    )
+                    box = None
 
         if box is None:
             # 박스가 없거나(원래 없었거나 높이 차이 검증에서 탈락) -> YOLO는 놓쳤어도

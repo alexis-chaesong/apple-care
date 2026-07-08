@@ -27,7 +27,7 @@ Force-Feedback Grasping
 
 import time
 
-from openclose import gripper_close_with_force, GRIPPER_MAX_FORCE
+from apple_care_robot.openclose import gripper_close_with_force, GRIPPER_MAX_FORCE
 
 FORCE_STEP = 50                 # 매 단계 힘 증가량 (openclose.py 레지스터 단위, 0.1N = 5N)
 GRASP_FORCE_THRESHOLD = 3.0     # 손목 반발력 변화량(N)이 이 값을 넘으면 "제대로 눌렀다/잡았다"고 판단

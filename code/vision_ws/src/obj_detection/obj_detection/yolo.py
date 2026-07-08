@@ -44,7 +44,22 @@ class AppleStatusModel:
         return list(frames.values())
 
     def get_best_detection(self, img_node):
-        """카메라에 보이는 것 중 confidence가 가장 높은 박스 하나를 반환.
+        """카메라에 보이는 것 중 바운딩 박스 면적이 가장 큰 박스 하나를 반환.
+
+        여러 사과가 동시에 보일 때, 처리 순서를 confidence가 아니라 "화면에
+        크게 보이는(=카메라에 더 가깝거나 실제로 더 큰) 사과부터"로 정하기 위함.
+        get_apple_status는 매 호출마다 이 함수가 고른 사과 하나만 돌려주고,
+        그 사과가 실제로 집어져서 트레이에서 사라지면 다음 폴링에서 자연히
+        그 다음으로 큰 사과가 뽑히는 방식으로 동작함.
+
+        다만 면적만으로 고르면, 벽/배경처럼 confidence는 낮지만(MIN_CANDIDATE_
+        CONFIDENCE만 겨우 넘는) 박스 자체는 큰 오탐이 실제 사과(면적은 작아도
+        confidence는 확실히 높은)를 계속 이겨버리는 문제가 있었음. 그래서
+        confidence가 MIN_KNOWN_CONFIDENCE(=detection.py가 "확실히 안다"고 보는
+        기준) 이상인 후보가 하나라도 있으면 그 안에서만 면적 최대를 고르고,
+        전부 그 기준 미만일 때만(진짜 아무 확실한 것도 없을 때만) 낮은 confidence
+        후보들 중 면적 최대로 폴백함 (그래야 detection.py의 depth 기반 "unknown"
+        폴백 경로도 계속 동작함).
 
         반환값: (class_name, confidence, box[x1,y1,x2,y2]) 또는 감지된 게 전혀 없으면
         (None, None, None).
@@ -55,7 +70,11 @@ class AppleStatusModel:
 
         results = self.model(frames, verbose=False)
 
-        best = None
+        def _box_area(box):
+            x1, y1, x2, y2 = box
+            return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+        candidates = []
         for res in results:
             for box, score, label in zip(
                 res.boxes.xyxy.tolist(),
@@ -64,12 +83,15 @@ class AppleStatusModel:
             ):
                 if score < MIN_CANDIDATE_CONFIDENCE:
                     continue
-                if best is None or score > best[1]:
-                    best = (CLASS_NAMES[int(label)], score, box)
+                candidates.append((CLASS_NAMES[int(label)], score, box))
 
-        if best is None:
+        if not candidates:
             return None, None, None
-        return best
+
+        confident_candidates = [c for c in candidates if c[1] >= MIN_KNOWN_CONFIDENCE]
+        pool = confident_candidates if confident_candidates else candidates
+
+        return max(pool, key=lambda c: _box_area(c[2]))
 
     def annotate_frame(self, frame):
         """단일 프레임에 YOLO 박스/라벨을 그려서 반환 (디버그 시각화용)."""

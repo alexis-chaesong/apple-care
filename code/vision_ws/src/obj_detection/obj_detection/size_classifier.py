@@ -20,8 +20,12 @@ depth_utils.DepthAnalysisMixin이 제공한다는 전제로 작성됨.
 # "apple_normal"로 판정된 사과들의 실제 지름(mm, depth로 환산) 이동 평균을 이용해,
 # 그중 상대적으로 뚜렷하게 작은 사과를 "apple_small"로 재분류한다.
 NORMAL_SIZE_HISTORY_LEN = 75
-MIN_NORMAL_SIZE_SAMPLES = 1
 SMALL_APPLE_SIZE_RATIO = 0.8
+
+# 비교할 정상 사과 표본이 1개 이하일 때는 평균 대비 비율을 신뢰할 수 없음
+# (표본 1개=그 사과 자체가 기준이 되어 비교 자체가 무의미, 0개=비교 대상 없음).
+# 이 경우엔 상대 비교 대신 절대 지름(mm) 기준으로 판단한다.
+ABSOLUTE_SMALL_DIAMETER_MM = 60
 
 # YOLO가 작은 사과를 "손상(apple_damaged)"으로 잘못 인식하는 경우가 있어,
 # 이 라벨들에 한해서는 depth로 잰 실제 크기가 충분히 작으면 손상이 아니라
@@ -59,15 +63,19 @@ class SizeClassifierMixin:
             # depth를 못 구하면 크기 비교 없이 원래 라벨 그대로 둔다.
             return label
 
-        avg_diameter = self._avg_normal_diameter()
+        sample_count, avg_diameter = self._normal_size_stats()
         if debug_info is not None:
             debug_info['avg_diameter_mm'] = avg_diameter
 
-        final_label = self._preview_size_label(label, diameter_mm, avg_diameter)
+        final_label = self._preview_size_label(label, diameter_mm, avg_diameter, sample_count)
         if final_label != label:
+            # sample_count<=1이면 avg_diameter가 None일 수 있음(절대 지름 기준으로
+            # 판단한 경우 - _preview_size_label 참고), 로그에서 None을 그대로
+            # ".1f"로 포매팅하면 TypeError가 나므로 별도 처리.
+            avg_txt = f"{avg_diameter:.1f}mm" if avg_diameter is not None else "N/A(표본 부족)"
             self.get_logger().info(
                 f"YOLO judged '{label}' but size({diameter_mm:.1f}mm) is just "
-                f"small vs avg({avg_diameter:.1f}mm) -> overriding to {final_label}"
+                f"small vs avg({avg_txt}) -> overriding to {final_label}"
             )
 
         # apple_small로 재분류되지 않은, 즉 평균 크기 산정에 쓸만한 정상 크기만 누적.
@@ -80,23 +88,33 @@ class SizeClassifierMixin:
         with self._normal_sizes_lock:
             self._normal_apple_sizes.append(diameter_mm)
 
-    def _avg_normal_diameter(self):
-        """지금까지 쌓인 정상 사과 지름(mm) 표본의 평균. 표본이 부족하면 None."""
+    def _normal_size_stats(self):
+        """지금까지 쌓인 정상 사과 지름(mm) 표본의 (개수, 평균) - 표본 없으면 (0, None)."""
         with self._normal_sizes_lock:
             samples = list(self._normal_apple_sizes)
-        if len(samples) >= MIN_NORMAL_SIZE_SAMPLES:
-            return sum(samples) / len(samples)
-        return None
+        if not samples:
+            return 0, None
+        return len(samples), sum(samples) / len(samples)
 
-    def _preview_size_label(self, label, diameter_mm, avg_diameter):
-        """avg_diameter 대비 diameter_mm이 충분히 작으면 "apple_small"로 바꿔서 반환.
+    def _preview_size_label(self, label, diameter_mm, avg_diameter, sample_count):
+        """diameter_mm이 충분히 작으면 "apple_small"로 바꿔서 반환.
+
+        정상 사과 표본이 여러 개(sample_count >= 2) 쌓였으면 그 평균(avg_diameter)
+        대비 비율(SMALL_APPLE_SIZE_RATIO)로 판단한다.
+        표본이 1개 이하면 평균 자체를 신뢰할 수 없으므로(표본 1개짜리 "평균"은
+        그 사과 자신이라 비교가 무의미, 0개면 비교 대상이 없음), 대신 절대
+        지름(ABSOLUTE_SMALL_DIAMETER_MM) 기준으로 판단한다.
 
         `_classify_size`의 실제 판정과 depth 디버그 창의 실시간 미리보기(여러 박스를
         한꺼번에 그릴 때)가 동일한 기준을 쓰도록 순수 계산만 분리한 함수. 상태(이동
         평균 deque)를 건드리지 않으므로 미리보기 용도로 반복 호출해도 안전하다.
         """
-        if label not in SIZE_OVERRIDE_LABELS or diameter_mm is None or avg_diameter is None:
+        if label not in SIZE_OVERRIDE_LABELS or diameter_mm is None:
             return label
-        if diameter_mm < avg_diameter * SMALL_APPLE_SIZE_RATIO:
+        if sample_count <= 1:
+            if diameter_mm <= ABSOLUTE_SMALL_DIAMETER_MM:
+                return "apple_small"
+            return label
+        if avg_diameter is not None and diameter_mm < avg_diameter * SMALL_APPLE_SIZE_RATIO:
             return "apple_small"
         return label

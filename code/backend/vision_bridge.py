@@ -98,6 +98,19 @@ def _positions_close(a: list[float], b: list[float], threshold_mm: float) -> boo
     return all(abs(x - y) <= threshold_mm for x, y in zip(a, b))
 
 
+def _is_zero_position(position: list[float]) -> bool:
+    """
+    obj_detection/detection.py의 _compute_position은 depth 측정 실패("cz == 0")
+    시에도 빈 리스트가 아니라 [0.0, 0.0, 0.0]을 반환한다 - "물체 없음"이 아니라
+    "박스는 찾았는데 그 지점의 depth를 못 읽었음"이라는 뜻. 이 값을 진짜 카메라
+    좌표 (0,0,0)으로 착각해서 그대로 흘려보내면, 로봇 쪽에서 camera_to_base()로
+    변환했을 때 "카메라 렌즈 자체의 위치"로 계산되어 엉뚱한 곳으로 이동하게 됨
+    (box_sequence_test.py에서 실제로 재현된 버그). 그래서 position을 쓸 때는
+    항상 "비어있는지"뿐 아니라 "전부 0인지"도 같이 걸러야 한다.
+    """
+    return bool(position) and all(v == 0.0 for v in position)
+
+
 def _ros_response_to_vision_feature(response) -> Optional[VisionFeatureIn]:
     """
     SrvAppleStatus.Response -> VisionFeatureIn 변환.
@@ -108,6 +121,9 @@ def _ros_response_to_vision_feature(response) -> Optional[VisionFeatureIn]:
     status = response.status
     confidence = float(response.confidence)
     position = list(response.position) if response.position else []
+    if _is_zero_position(position):
+        # depth 측정 실패 sentinel([0,0,0])이지 실제 좌표가 아니므로 없는 것으로 취급
+        position = []
 
     if not (0.0 <= confidence <= 1.0):
         logger.warning(

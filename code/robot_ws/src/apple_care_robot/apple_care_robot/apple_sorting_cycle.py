@@ -13,6 +13,17 @@ Apple Sorting Cycle
              "discard_box"|"ugly_box", "pose": [x,y,z] 또는 None, "reason": str}
       Vision이 아직 판정을 못 내렸거나 확신이 낮은 사과는 ask_human 경로로 빠져서
       여기로 아예 들어오지 않음 (백엔드 HITL 흐름, 로봇 쪽은 신경 쓸 필요 없음).
+
+      ⚠️ pose는 로봇 베이스 좌표계가 아니라 "카메라 좌표계" 좌표임
+      (obj_detection/depth_utils.py의 _pixel_to_camera_coords가 계산한 값이
+      vision_bridge.py -> decision_planner.py를 그대로 통과해서 옴). 그래서 바로
+      posx()에 넣으면 안 되고, vision_transform.camera_to_base()로 로봇 베이스
+      좌표계로 변환한 뒤 써야 함 (cobot2_ws/pick_and_place_voice의
+      robot_control.py에 있는 transform_to_base와 동일한 원리 - 자세한 설명은
+      vision_transform.py 참고). 변환에는 "카메라가 그 사과를 봤을 때의 로봇
+      pose"가 필요한데, 로봇이 CAMERA 위치에 서 있는 동안 vision이 감지하고
+      decision이 내려오므로 여기서는 decision을 받은 시점의 get_current_posx()를
+      그대로 그 값으로 사용함.
     - /robot/command (String/JSON) 구독: {"command": "START"|"EMERGENCY_STOP"|...}
       START가 와야 사이클을 시작하고, EMERGENCY_STOP이 오면 사이클을 중단함.
       HOLD/RESUME/MANUAL_PAUSE로 사이클 도중에 멈췄다가 재개하는 것은 이번
@@ -63,13 +74,14 @@ import rclpy
 import DR_init
 from std_msgs.msg import String
 
-from force_place import (
+from apple_care_robot.force_place import (
     force_controlled_place,
     CAREFUL_APPROACH_VEL, CAREFUL_APPROACH_ACC,
     EXISTING_APPLE_HOVER_CLEARANCE, EXISTING_APPLE_FORCE_THRESHOLD,
 )
-from openclose import gripper_open
-from status_bus import StatusBus
+from apple_care_robot.openclose import gripper_open
+from apple_care_robot.status_bus import StatusBus
+from apple_care_robot.vision_transform import camera_to_base
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
@@ -103,7 +115,7 @@ def pick_apple(node, pick_pos):
         bool: 파지 성공 여부 (손목 힘 센서로 접촉/파지가 확인됐는지)
     """
     from DSR_ROBOT2 import movel
-    from grasp_force import grasp_apple_with_force_feedback
+    from apple_care_robot.grasp_force import grasp_apple_with_force_feedback
 
     node.get_logger().info(f'사과 집기 위치로 이동: {pick_pos}')
     movel(pick_pos)
@@ -132,7 +144,10 @@ def main(args=None):
     status_bus = StatusBus(comm_node)
     status_bus.set_state("INIT")
 
-    from DSR_ROBOT2 import movel, movej, posx, posj, wait, set_velx, set_accx, set_velj, set_accj
+    from DSR_ROBOT2 import (
+        movel, movej, posx, posj, wait,
+        set_velx, set_accx, set_velj, set_accj, get_current_posx,
+    )
 
     # 좌표 정의
     HOME = posj(0, 0, 90, 0, 90, 0)
@@ -240,8 +255,15 @@ def main(args=None):
         box_name, box_pos, way_pos, has_existing_apple = DESTINATION_TO_BOX[destination]
 
         if pose:
-            px, py, pz = pose
-            pick_pos = posx(px, py, pz, *DEFAULT_PICK_ORIENTATION)
+            # pose는 카메라 좌표계 -> 로봇이 현재 서 있는(=CAMERA에서 감지된
+            # 순간의) pose를 기준으로 로봇 베이스 좌표계로 변환해야 movel에 그대로
+            # 쓸 수 있음. 자세한 설명은 vision_transform.py 상단 docstring 참고.
+            camera_pose_at_detection = get_current_posx()[0]
+            bx, by, bz = camera_to_base(pose, camera_pose_at_detection)
+            node.get_logger().info(
+                f"Vision 좌표 변환: camera={pose} -> base=({bx:.2f}, {by:.2f}, {bz:.2f})"
+            )
+            pick_pos = posx(bx, by, bz, *DEFAULT_PICK_ORIENTATION)
         else:
             node.get_logger().warn("decision.pose가 없어 임시 pick 좌표를 사용합니다.")
             pick_pos = posx(*FALLBACK_PICK_POS_XYZ, *DEFAULT_PICK_ORIENTATION)

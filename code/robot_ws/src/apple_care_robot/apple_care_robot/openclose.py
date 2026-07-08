@@ -3,17 +3,45 @@ Gripper Open/Close (OnRobot RG2, Modbus/TCP 직접 제어)
 =========================================================
 
 box_sequence_test.py / apple_sorting_cycle.py 등에서
-    from openclose import gripper_open, gripper_close
+    from apple_care_robot.openclose import gripper_open, gripper_close
 형태로 가져다 씀.
 
 OnRobotRGControllerServer ROS2 노드나 "/onrobot/sendCommand" 서비스에는
 의존하지 않음 (해당 노드가 실물/시뮬레이션 환경에서 죽어있어 응답하지 않는
 문제가 있었음). 대신 Compute Box에 Modbus/TCP로 직접 접속해서 레지스터를 씀.
+
+pymodbus 버전 호환:
+    ROS 2 Humble 환경(구버전 pymodbus, 2.x대)과 Jazzy 환경(pymodbus 3.x대)에서
+    각각 apt로 설치되는 python3-pymodbus 버전이 달라 API가 서로 다름.
+        - import 경로: pymodbus < 3.0은 `pymodbus.client.sync.ModbusTcpClient`,
+          >= 3.0은 `.sync` 서브모듈이 없어지고 `pymodbus.client.ModbusTcpClient`.
+        - write_registers()의 슬레이브 ID 인자명: 버전에 따라 `unit`(2.x~3.0대) /
+          `slave`(3.x대) / `device_id`(최신 3.7+)로 계속 바뀜.
+    아래는 두 경로를 모두 시도해서 import하고, write_registers 실제 시그니처를
+    inspect해서 어떤 이름을 쓰는지 런타임에 판별하는 방식으로 두 배포판 모두에서
+    코드 수정 없이 그대로 동작하게 함.
 """
 
+import inspect
 import time
 
-from pymodbus.client.sync import ModbusTcpClient
+try:
+    from pymodbus.client.sync import ModbusTcpClient  # pymodbus < 3.0 (예: ROS 2 Humble)
+except ImportError:
+    from pymodbus.client import ModbusTcpClient  # pymodbus >= 3.0 (예: ROS 2 Jazzy)
+
+
+def _resolve_unit_kwarg() -> str:
+    """설치된 pymodbus 버전의 write_registers가 쓰는 슬레이브 ID 인자명을 찾는다."""
+    params = inspect.signature(ModbusTcpClient.write_registers).parameters
+    for name in ("unit", "slave", "device_id"):
+        if name in params:
+            return name
+    # 위 세 이름 중 아무것도 못 찾으면(알 수 없는 미래 버전) 가장 흔한 이름으로 시도
+    return "slave"
+
+
+_UNIT_KWARG = _resolve_unit_kwarg()
 
 # OnRobot Compute Box 접속 정보 (실제 장비의 IP로 맞춰서 수정)
 GRIPPER_IP = "192.168.1.1"
@@ -40,7 +68,7 @@ def _send_command(force: int, width: int) -> bool:
         client.write_registers(
             address=0,
             values=[force, width, 16],
-            unit=GRIPPER_CHANGER_ADDR,
+            **{_UNIT_KWARG: GRIPPER_CHANGER_ADDR},
         )
         return True
     finally:
