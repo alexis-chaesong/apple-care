@@ -188,6 +188,7 @@ class HITLStateMachine:
                 destination=result_destination,
                 pose=session.position,
                 reason="admin_force_reset",
+                condition=session.condition,
             )
         logger.warning(
             "관리자 강제 리셋 (session_id=%s): destination=%s",
@@ -377,6 +378,7 @@ class HITLStateMachine:
             destination=destination,
             pose=session.position,
             reason="human_feedback",
+            condition=session.condition,
         )
         logger.info(
             "HITL 세션 완료 (session_id=%s): destination=%s confidence=%.2f",

@@ -71,6 +71,7 @@ import threading
 import rclpy
 import DR_init
 from std_msgs.msg import String
+from apple_care_msgs.srv import SrvAppleStatus
 
 from apple_care_robot.force_place import (
     force_controlled_place,
@@ -79,7 +80,7 @@ from apple_care_robot.force_place import (
 )
 from apple_care_robot.openclose import gripper_open
 from apple_care_robot.status_bus import StatusBus
-from apple_care_robot.vision_transform import camera_to_base
+from apple_care_robot.vision_transform import camera_to_base, SMALL_APPLE_DEPTH_OFFSET_MM
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
@@ -96,6 +97,13 @@ DEFAULT_PICK_ORIENTATION = (128.8, -174.74, -139.09)
 
 # decision.pose가 None으로 온 경우(비전이 좌표를 못 준 경우)에 쓰는 임시 pick 좌표.
 FALLBACK_PICK_POS_XYZ = (492.0, 13.48, 23.39)
+
+# box_sequence_test.py에서 포팅: 그립 자체가 실패하는 경우(사과를 놓침 -
+# grasp_apple_with_force_feedback이 picked_ok=False)를 대비한 재시도 횟수. 매번
+# CAMERA로 돌아가서 위치를 다시 받아온 뒤 집기를 재시도함.
+MAX_PICK_ATTEMPTS = 3
+
+VISION_SERVICE_NAME = "/get_apple_status"
 
 DESTINATION_TO_BOX = {}  # main()에서 채움: destination -> (box_name, box_pos, way_pos, has_existing_apple)
 
@@ -149,7 +157,7 @@ def main(args=None):
 
     # 좌표 정의
     HOME = posj(0, 0, 90, 0, 90, 0)
-    CAMERA = posx(458.01, -112.234, 246.969, 158.276, 176.847, 157.433)
+    CAMERA = posx(493.30, -104.81, 247.48, 26.09, 175.22, 23.18)
 
     WAY1 = posx(446.54, 244.89, 206.64, 79.38, 177.62, 172.06)
     WAY2 = posx(740.15, 189.44, 182.73, 170.37, -162.55, -103.95)
@@ -173,6 +181,40 @@ def main(args=None):
     set_accx(45, 30)
     set_velj(30)
     set_accj(30)
+
+    # box_sequence_test.py에서 포팅: 그립 실패 재시도 시 CAMERA에서 사과 위치를
+    # 다시 받아오기 위한 전용 서비스 클라이언트 (백엔드의 decision은 최초 감지
+    # 시점의 위치만 담고 있어서, 그립을 놓친 뒤 재시도할 땐 최신 위치가 필요함).
+    vision_client = node.create_client(SrvAppleStatus, VISION_SERVICE_NAME)
+    while not vision_client.wait_for_service(timeout_sec=3.0):
+        node.get_logger().info(f"Waiting for {VISION_SERVICE_NAME} service...")
+
+    def refresh_pick_pos(condition):
+        """
+        그립 실패 후 재시도 직전에 호출. CAMERA 위치에 서 있는 상태에서
+        get_apple_status를 다시 호출해 최신 위치로 pick_pos를 재계산함
+        (사과가 그립 실패 중 살짝 밀렸을 수 있음). 실패(서비스 오류/depth 측정
+        실패)하면 None을 반환하고, 호출부는 이전 pick_pos로 그대로 재시도함.
+        """
+        future = vision_client.call_async(SrvAppleStatus.Request())
+        rclpy.spin_until_future_complete(node, future)
+        response = future.result()
+        if response is None:
+            node.get_logger().error(f"{VISION_SERVICE_NAME} 서비스 호출 실패 (위치 재획득)")
+            return None
+
+        position = list(response.position or [])
+        if not position or all(v == 0.0 for v in position):
+            node.get_logger().warn("위치 재획득 실패 - depth 측정 실패(position이 [0,0,0])")
+            return None
+
+        camera_pose_at_detection = get_current_posx()[0]
+        depth_offset = SMALL_APPLE_DEPTH_OFFSET_MM if condition == "small" else None
+        bx, by, bz = camera_to_base(position, camera_pose_at_detection, depth_offset_mm=depth_offset)
+        node.get_logger().info(
+            f"위치 재획득: camera={position} -> base=({bx:.2f}, {by:.2f}, {bz:.2f})"
+        )
+        return posx(bx, by, bz, *DEFAULT_PICK_ORIENTATION)
 
     # ------------------------------------------------------------------
     # 백엔드 연동: /decision/result 구독, /robot/command 구독
@@ -212,7 +254,17 @@ def main(args=None):
 
     # movel/wait이 메인 스레드를 블로킹하는 동안에도 위 구독 콜백이 처리되도록
     # comm_node를 별도 스레드에서 spin (DSR 제어용 node는 건드리지 않음 - 위 주석 참고).
-    spin_thread = threading.Thread(target=rclpy.spin, args=(comm_node,), daemon=True)
+    #
+    # rclpy.spin(comm_node)처럼 executor를 명시하지 않으면 프로세스 전역(암묵적)
+    # executor를 쓰는데, movej/movel(DSR_ROBOT2 내부)도 같은 컨텍스트에서
+    # rclpy.spin_until_future_complete(g_node, future)로 똑같이 암묵적 executor를
+    # 쓰려고 해서 "RuntimeError: Executor is already spinning"이 남 (실제로 겪은
+    # 문제 - object_detection의 img_node 중첩 executor 충돌과 동일한 원인,
+    # python310_to_312_voice_changes.md 19.2번 항목 참고). comm_node 전용
+    # SingleThreadedExecutor를 명시적으로 만들어서 완전히 분리해야 함.
+    comm_executor = rclpy.executors.SingleThreadedExecutor()
+    comm_executor.add_node(comm_node)
+    spin_thread = threading.Thread(target=comm_executor.spin, daemon=True)
     spin_thread.start()
 
     status_bus.set_state("READY")
@@ -254,6 +306,7 @@ def main(args=None):
         fruit = decision.get("fruit")
         destination = decision.get("destination")
         pose = decision.get("pose")
+        condition = decision.get("condition")
 
         if destination not in DESTINATION_TO_BOX:
             node.get_logger().error(f"알 수 없는 destination: {destination} - 이 사과는 건너뜁니다.")
@@ -261,12 +314,17 @@ def main(args=None):
 
         box_name, box_pos, way_pos, has_existing_apple = DESTINATION_TO_BOX[destination]
 
+        # 작은 사과는 몸통이 낮아서 일반 오프셋만큼 내려가면 트레이/받침대와
+        # 충돌하므로, condition="small"일 때만 덜 내려가는 전용 오프셋을 씀
+        # (box_sequence_test.py에서 포팅).
+        depth_offset = SMALL_APPLE_DEPTH_OFFSET_MM if condition == "small" else None
+
         if pose:
             # pose는 카메라 좌표계 -> 로봇이 현재 서 있는(=CAMERA에서 감지된
             # 순간의) pose를 기준으로 로봇 베이스 좌표계로 변환해야 movel에 그대로
             # 쓸 수 있음. 자세한 설명은 vision_transform.py 상단 docstring 참고.
             camera_pose_at_detection = get_current_posx()[0]
-            bx, by, bz = camera_to_base(pose, camera_pose_at_detection)
+            bx, by, bz = camera_to_base(pose, camera_pose_at_detection, depth_offset_mm=depth_offset)
             node.get_logger().info(
                 f"Vision 좌표 변환: camera={pose} -> base=({bx:.2f}, {by:.2f}, {bz:.2f})"
             )
@@ -282,13 +340,49 @@ def main(args=None):
         # 이 decision을 처리하는 순간부터 그리퍼가 다시 CAMERA로 돌아와 열릴 때까지는
         # "새 사과를 보는 중"이 아니므로 READY를 벗어남을 명시적으로 알림
         # (백엔드가 이 값이 READY가 아닐 때는 Vision 감지를 무시하도록 게이팅함)
-        status_bus.set_state("MOVING")
-        status_bus.set_motion("PICKING", fruit)
-        picked_ok = pick_apple(node, pick_pos)
-        status_bus.publish_gripper_status(picked_ok)
-        if not picked_ok:
-            status_bus.publish_safety("ERR_PICK", f"{fruit} 파지(힘 감지) 실패")
+        #
+        # 그립 실패(힘 감지로 사과를 놓친 것으로 판단) 시 pick_pos 하나로 계속
+        # 헛손질하지 않도록, CAMERA로 돌아가 위치를 다시 받아온 뒤 MAX_PICK_ATTEMPTS
+        # 번까지 재시도함 (box_sequence_test.py의 try_pick_apple에서 포팅).
+        picked_ok = False
+        for attempt in range(1, MAX_PICK_ATTEMPTS + 1):
+            status_bus.set_state("MOVING")
+            status_bus.set_motion("PICKING", fruit)
+            picked_ok = pick_apple(node, pick_pos)
+            status_bus.publish_gripper_status(picked_ok)
+            if picked_ok:
+                break
+
+            status_bus.publish_safety(
+                "ERR_PICK", f"{fruit} 파지(힘 감지) 실패 ({attempt}/{MAX_PICK_ATTEMPTS})"
+            )
+            if attempt == MAX_PICK_ATTEMPTS:
+                break
+
+            node.get_logger().warn(
+                f"그립 실패(사과를 놓친 것으로 판단) - CAMERA로 돌아가 위치를 "
+                f"다시 받아서 재시도합니다. ({attempt}/{MAX_PICK_ATTEMPTS})"
+            )
+            # 다음 시도 전에 그리퍼를 확실히 열어둠 (실패한 그립이 반쯤 닫힌
+            # 채로 남아있으면 다음 파지 힘 감지 기준선이 틀어질 수 있음).
+            gripper_open()
+            movel(CAMERA)
+            wait(0.3)
+            refreshed_pos = refresh_pick_pos(condition)
+            if refreshed_pos is not None:
+                pick_pos = refreshed_pos
+            # 재획득 실패 시 이전 pick_pos로 그대로 재시도함
         wait(0.3)
+
+        if not picked_ok:
+            node.get_logger().error(
+                f"{MAX_PICK_ATTEMPTS}번 시도해도 그립에 실패해 이번 사과는 포기합니다."
+            )
+            node.get_logger().info("Move to CAMERA position (집기 포기 후 복귀)")
+            movel(CAMERA)
+            wait(0.3)
+            status_bus.set_state("READY")
+            continue
 
         # 2) 집은 직후 별도 퇴피 없이 바로 CAMERA 위치로 복귀
         node.get_logger().info("Move to CAMERA position (집은 직후 바로 복귀)")
@@ -367,6 +461,7 @@ def main(args=None):
     movej(HOME)
     wait(0.3)
 
+    comm_executor.shutdown()
     comm_node.destroy_node()
     node.destroy_node()
     rclpy.shutdown()

@@ -330,6 +330,19 @@ class VisionBridgeManager:
             # 반드시 여기서 잡아서 로그만 남기고 이번 메시지는 버림
             logger.error("Vision 서비스 응답 처리 중 예외 발생, 메시지를 버림", exc_info=True)
 
+    def force_redetect(self) -> None:
+        """
+        직전에 큐에 넣은 (status, position) 디바운스 상태를 초기화.
+
+        services/voice_policy.py가 음성으로 새 정책을 등록했을 때 호출함 - 카메라에
+        아직 같은 사과가 그대로 있으면, 이 초기화가 없을 경우 다음 폴링에서도
+        "이미 처리한 것"으로 취급되어 재큐잉되지 않고, 방금 등록한 새 정책이 그
+        사과에는 절대 반영되지 않는 문제가 있었음.
+        """
+        self._last_status = None
+        self._last_position = None
+        self._unknown_streak = 0
+
     def _is_duplicate(self, status: str, position: list[float]) -> bool:
         """직전에 큐에 넣은 (status, position)과 실질적으로 같으면 True (같은 사과)."""
         if self._last_status is None or status != self._last_status:

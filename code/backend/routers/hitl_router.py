@@ -107,7 +107,7 @@ async def receive_voice_policy_command():
     트리거 방식만 다를 뿐 마이크로 듣고 정책을 저장하는 로직은 완전히 같음.
     """
     result = await run_voice_policy_command()
-    if result["result"] != "SUCCESS":
+    if result["result"] not in ("SUCCESS", "ROBOT_COMMAND"):
         raise HTTPException(status_code=422, detail=result)
     return result
 

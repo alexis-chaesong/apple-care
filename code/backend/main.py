@@ -200,6 +200,9 @@ async def _vla_consumer_loop() -> None:
                         destination=result.destination,
                         pose=result.position,
                         reason=result.reason,
+                        condition=result.condition,
+                        # condition("small" 등)을 같이 보내야 로봇 쪽(apple_sorting_cycle.py)이
+                        # 작은 사과 전용 depth 보정(SMALL_APPLE_DEPTH_OFFSET_MM)을 적용할 수 있음
                     )
                     # 실시간 모니터링을 위해 HMI에도 브로드캐스트
                     await connection_manager.broadcast({
