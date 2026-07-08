@@ -1,0 +1,60 @@
+# Vision(obj_detection) Architecture Principles & Design Decision
+
+1. "역할이 다르면 파일이 다르다" 원칙 (Single Responsibility)
+
+    기존 패턴 준수: backend가 llm_service/decision_planner/bayesian_policy를 관심사별로 쪼갠 것과 동일한 원칙을, detection.py 하나에 다 몰아넣지 않고 mixin 3개로 분리하는 방식으로 적용.
+
+        depth_utils.py (DepthAnalysisMixin): 배경 캘리브레이션, 픽셀별 배경 차분, YOLO 박스의 depth 재검증, 미확인 물체 탐지, 픽셀↔카메라 좌표 변환. "depth 프레임을 갖고 뭘 계산하는가"만 담당.
+        size_classifier.py (SizeClassifierMixin): depth로 잰 실측 지름으로 apple_small 재분류 여부만 판단. YOLO가 어떻게 박스를 냈는지, depth 검증을 통과했는지는 모름.
+        debug_overlay.py (DebugOverlayMixin): 로컬 뎁스 디버그 창 + 프론트(hmi_app)로 나가는 디버그 이미지 오버레이만 담당. 실제 서비스 판정 로직(detection.py)과 완전히 분리되어 있어서, 오버레이가 죽어도 서비스 응답에는 영향이 없고 반대도 마찬가지.
+        detection.py 본체: ROS2 노드 초기화 + get_apple_status 서비스 콜백 오케스트레이션만 담당. "무엇을 어떤 순서로 검증하는가"만 여기 있고, 각 검증의 구체적인 계산은 위 mixin에 위임.
+
+    도입 기대 효과: depth 계산식을 바꿀 일이 생기면 depth_utils.py만, 크기 재분류 기준을 바꿀 일이 생기면 size_classifier.py만 건드리면 됨. 실제로 size_classifier.py의 판정 기준을 통째로 갈아엎었을 때도(아래 4번 참고) detection.py의 판정 순서/흐름은 전혀 안 건드렸음.
+
+2. "여러 겹의 독립적인 안전장치" 원칙 (Layered Safety Nets, 단일 임계값에 의존하지 않음)
+
+    설계 배경: YOLO 단일 confidence 값 하나로 "이건 확실한 사과다"를 판단하면, 조명/각도/오탐 같은 서로 다른 실패 원인이 전부 confidence라는 값 하나에 뭉뚱그려져서, 어느 한 값을 조정할 때마다 다른 실패 모드가 같이 흔들림.
+    그래서 detection.py의 handle_get_status는 서로 독립적인 4단계 검증을 순서대로 거침 - 각 단계는 서로 다른 "이게 왜 틀렸을 수 있는가"를 담당:
+
+        1) get_best_detection (yolo.py): "여러 후보 중 어느 박스를 볼 것인가" - confidence 0.4(MIN_KNOWN_CONFIDENCE) 이상 후보가 있으면 그 안에서 면적 최대, 없으면 전체 후보 중 면적 최대로 폴백. (면적만으로 고르면 배경 오탐이 진짜 사과를 이겨버리는 문제가 있어서 confidence 게이트를 먼저 통과시킨 후 면적 비교하도록 설계.)
+        2) _box_ring_depths + YOLO_TRUST_CONFIDENCE (detection.py/depth_utils.py): "이게 진짜 3D 물체인가, 사진/그림자인가" - 박스 안쪽 depth가 바로 바깥 배경보다 HEIGHT_DIFF_MARGIN_MM(20mm) 이상 튀어나와야 통과. 단, YOLO confidence가 0.7(YOLO_TRUST_CONFIDENCE) 이상이면 이 검증 자체를 생략 - "YOLO가 이 정도로 확신하면 depth로 다시 의심할 필요는 없다"는 우선순위 규칙.
+        3) MIN_KNOWN_CONFIDENCE 게이트 (detection.py): "라벨을 신뢰할 수 있는가" - 0.4 미만이면 라벨은 버리고 unknown으로.
+        4) _classify_size (size_classifier.py): "물리적으로 정말 그 크기가 맞는가" - depth 실측 지름이 ABSOLUTE_SMALL_DIAMETER_MM(60mm) 이하면 apple_normal/apple_damaged 라벨이어도 apple_small로 재분류.
+
+    기대 효과: 각 임계값을 독립적으로 튜닝 가능. 예를 들어 작은 사과가 자꾸 unknown으로 새는 문제는 2번 단계(YOLO_TRUST_CONFIDENCE)만 건드려서 해결했고, normal/damaged가 자꾸 small로 오분류되는 문제는 4번 단계(size_classifier 기준)만 건드려서 해결함 - 서로 다른 단계라 한쪽을 고쳐도 다른 쪽 안전장치는 그대로 유지됨.
+
+3. "배경은 절대값이 아니라 자기 자신의 과거와 비교" 원칙 (픽셀별 배경 차분)
+
+    기존 실패 사례: 트레이까지의 거리를 스칼라 값 하나(예: 500mm)로 잡고 "그보다 가까우면 물체"로 판단했더니, 트레이 바닥이 기울어져 있거나 펜스처럼 원래도 튀어나온 고정 구조물이 있으면 그 구조물 자체를 계속 물체로 오인함(펜스가 화면의 70%까지 "물체"로 잡히는 문제가 실제로 있었음).
+    설계 결정: _calibrate_scene()이 시작 시점에 depth 프레임 여러 장(1.5초, BACKGROUND_CALIBRATION_DURATION_SEC)을 모아 픽셀별 median을 "그 픽셀의 배경값"으로 저장(background_depth_map). 이후 모든 물체 탐지는 "이 픽셀이 캘리브레이션 시점 자기 자신보다 PRESENCE_MARGIN_MM(10mm) 이상 가까워졌는가"만 봄.
+    기대 효과: 트레이가 기울어져 있든 펜스가 있든, 그 자리의 "원래 상태"를 기준으로 삼으므로 화면 전체에 공통 기준을 적용할 때 생기던 구조적 오탐이 사라짐. 펜스 위에 사과가 새로 올라가면 그 자리만 정확히 "가까워짐"으로 잡힘.
+
+4. [특이사항] 적응형(평균 기반) 판정보다 고정 절대값이 나을 때가 있다 (size_classifier 재설계)
+
+    처음 설계: apple_small 재분류를 "최근 정상 사과들의 평균 지름 대비 80% 미만이면 small"이라는 적응형(relative) 기준으로 설계함 - 트레이마다 사과 품종/크기 분포가 다를 수 있으니 상대 비교가 이론적으로는 더 합리적이라 판단.
+    실제로 겪은 문제: 이 평균값이 (a) 서비스 콜백 스레드(1초 1개)와 (b) 디버그 오버레이 스레드(20Hz 다중 박스 스캔) 양쪽에서 동시에 갱신되다 보니, "같은 크기의 사과인데 언제 판정받느냐에 따라 결과가 달라지는" 비결정적 동작이 생김. 게다가 표본이 0~1개뿐일 때는 "평균"이라는 개념 자체가 무의미해서 별도 절대 기준 분기가 필요했고, 두 기준이 공존하면서 코드도 복잡해지고 예측 가능성도 떨어짐.
+    결정 사항: 평균/표본 추적 로직(deque, lock, 관련 함수 전부)을 통째로 제거하고, "depth 실측 지름이 60mm(ABSOLUTE_SMALL_DIAMETER_MM) 이하면 무조건 small"이라는 고정 절대값 하나로 단순화.
+    사유: 이 프로젝트는 트레이/사과 품종이 고정되어 있어 "적응형"이 주는 이점(다양한 환경 대응)보다 "언제 실행해도 같은 결과"라는 결정론적 동작이 디버깅/신뢰성 측면에서 훨씬 중요하다고 판단. backend.txt 4번 항목("패턴 일관성 vs 폴더 순수성")과 같은 종류의 트레이드오프 - 이론적 우아함보다 실제 운용 단순성을 택함.
+
+5. "느린 I/O와 실시간 시각화는 스레드/콜백그룹으로 분리" 원칙
+
+    기존 패턴 준수: backend가 ROS 콜백 안에서 웹소켓을 직접 안 부르고 call_soon_threadsafe로 경계를 넘기던 것과 동일한 사상.
+    구체적 적용:
+
+        img_node(카메라 토픽 구독)는 전용 SingleThreadedExecutor + 전용 스레드에서 계속 spin. get_apple_status 서비스 콜백이 1초씩 걸려도 카메라 프레임 갱신이 막히지 않음.
+        get_apple_status 서비스(느림, ~1초)와 디버그 이미지 퍼블리시 타이머(0.05초 주기)를 서로 다른 MutuallyExclusiveCallbackGroup으로 등록하고 MultiThreadedExecutor로 실행 - 하나가 다른 하나를 블로킹하지 않음.
+        cv2.imshow 기반 로컬 뎁스 디버그 창은 GUI 백엔드 특성상 "생성한 스레드"에서 계속 그려야 해서, 전용 스레드 하나(_depth_debug_thread)를 따로 둠 - MultiThreadedExecutor의 워커 스레드에 맡기면 매번 다른 스레드에서 실행되어 창이 안 뜨거나 멈춰 보임.
+
+    기대 효과: 느린 서비스 호출, 빠른 디버그 시각화, GUI 렌더링이라는 성격이 전혀 다른 세 가지 작업이 서로 발목을 잡지 않음.
+
+6. "비전은 로봇을 모른다" 원칙 (패키지 경계, 코드 중복을 감수하고서라도)
+
+    원칙: obj_detection 패키지는 DSR_ROBOT2 등 로봇 제어 의존성이 전혀 없는 순수 비전 노드로 유지. 카메라 인식과 로봇 팔 제어는 별개의 관심사이자 별개의 colcon 워크스페이스(vision_ws / robot_ws)이므로, 비전 쪽 코드가 로봇 쪽 내부 구현을 알아야 하는 상황을 최소화.
+    예외와 트레이드오프: prepare_camera.py(카메라 노드 띄우기 전 그리퍼 오픈 + 로봇 이동)는 태생적으로 로봇을 움직여야 해서 이 원칙에서 벗어남. 이때도 apple_care_robot 패키지를 import하지 않고, 그리퍼 제어 로직(gripper_control.py)을 obj_detection 안에 그대로 복제해서 워크스페이스 간 실행 의존성을 피함.
+    사유: robot_ws가 안 빌드/소싱된 환경에서도 obj_detection 자체(카메라 인식, get_apple_status 서비스)는 독립적으로 테스트 가능해야 한다는 우선순위를 코드 중복(그리퍼 로직 두 곳 유지보수)보다 높게 둠. backend.txt의 stt_tts/ 폴더 물리 분리와 같은 이유 - "하드웨어 종속적인 문제"와 "인식 로직 문제"의 디버깅 경계를 명확히 하기 위함.
+
+7. "좌표 변환은 그 물체를 본 순간의 로봇 pose와 반드시 짝지어야 한다" 원칙
+
+    (이 원칙 자체는 robot_ws의 vision_transform.py에 구현되어 있지만, 비전이 내놓는 좌표계의 성질을 정의하는 부분이라 여기 같이 기록.)
+    설계 원리: obj_detection이 내놓는 3D 위치는 항상 카메라 좌표계(depth_utils._pixel_to_camera_coords) 기준. 이걸 로봇 베이스 좌표계로 옮기려면 "카메라가 그 물체를 본 바로 그 순간"의 로봇 pose(eye-in-hand 캘리브레이션 전제)가 반드시 같이 있어야 함 - 로봇이 그 사이에 다른 위치로 움직였다면 변환 결과가 완전히 틀어짐.
+    적용: box_sequence_test.py/apple_sorting_cycle.py 모두 "로봇이 CAMERA 위치에 서 있는 동안 vision을 호출 → 그 직후 get_current_posx()로 로봇 pose를 얻음 → 그 pose로 변환"하는 순서를 지킴. 이 커플링을 깨고 나중에 변환하면(예: 박스로 이동한 뒤에 변환) 좌표가 어긋나는 버그가 남.
