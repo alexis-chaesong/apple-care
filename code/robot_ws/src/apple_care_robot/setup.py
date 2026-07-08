@@ -23,8 +23,9 @@ setup(
         'console_scripts': [
             'motion_planner_node = apple_care_robot.motion_planner_node:main',
             'robot_controller_node = apple_care_robot.robot_controller_node:main',
+            # 실제 운영 진입점은 이 하나뿐. apple_sorting_cycle.py는 이제 main()이
+            # 없는 공용 함수 모듈(pick_apple 등)이라 콘솔 스크립트로 등록하지 않음.
             'box_sequence_test = apple_care_robot.box_sequence_test:main',
-            'apple_sorting_cycle = apple_care_robot.apple_sorting_cycle:main',
         ],
     },
 )
