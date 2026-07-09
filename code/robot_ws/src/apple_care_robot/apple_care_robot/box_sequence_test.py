@@ -67,7 +67,7 @@ from apple_care_robot.status_bus import StatusBus
 from apple_care_robot.estop_handler import EstopRecoveryTracker, check_and_recover
 from apple_care_robot.safe_motion import (
     safe_movel, safe_movej, EmergencyStopError, is_controller_in_hardware_safety_stop,
-    resume_motion,
+    get_controller_robot_state, ROBOT_STATE_NAMES,
 )
 
 ROBOT_ID = "dsr01"
@@ -149,6 +149,15 @@ def main(args=None):
     def check_hw_safety_stop():
         return is_controller_in_hardware_safety_stop(comm_node)
 
+    def describe_robot_state() -> str:
+        # lift movel이 서비스 응답은 성공으로 받으면서도 실제로는 z가 안 바뀌는
+        # 문제의 원인을 좁히기 위한 진단용 - 그 순간 컨트롤러가 실제로 어떤 상태
+        # (STANDBY/MOVING/SAFE_STOP 등)를 보고하는지 로그로 남김.
+        state = get_controller_robot_state(comm_node)
+        if state is None:
+            return "UNKNOWN(조회 실패)"
+        return f"{ROBOT_STATE_NAMES.get(state, 'UNKNOWN')}({state})"
+
     def do_safe_movel(target, vel=None, acc=None, ref=None):
         safe_movel(
             comm_node, target, emergency_stop,
@@ -214,10 +223,12 @@ def main(args=None):
             # comm_node를 넘기는 이유: stop_motion()과 동일하게 DSR 제어용 메인 node를
             # 여기서 또 spin하면 충돌 위험이 있음 (comm_node는 이미 별도 스레드에서 spin 중).
             check_hw_safety_stop=lambda: is_controller_in_hardware_safety_stop(comm_node),
-            # E-STOP 시 stop_motion()이 move_stop(HOLD)로 걸어둔 일시정지 상태를
-            # 복구 이동 전에 풀어줌 - 실측으로 확인된 문제(안 풀면 movel이 성공
-            # 응답을 받고도 실제로는 안 움직임) 참고: safe_motion.resume_motion.
-            resume_motion=lambda: resume_motion(comm_node),
+            # resume_motion(move_resume)은 더 이상 안 씀 - stop_motion() 기본값이
+            # DR_HOLD에서 DR_QSTOP으로 바뀌면서(safe_motion.STOP_MODE_DEFAULT 참고)
+            # 애초에 "재개"가 필요한 일시정지 상태를 만들지 않음(auto_dump_robot_pkg와
+            # 동일한 방식 - move_resume 없이도 정지 직후 movel/movej가 정상 동작함이
+            # 그 프로젝트에서 실기로 검증돼 있음).
+            describe_robot_state=describe_robot_state,
         )
 
     # ------------------------------------------------------------------

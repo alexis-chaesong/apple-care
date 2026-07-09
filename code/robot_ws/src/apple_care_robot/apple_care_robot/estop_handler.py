@@ -142,6 +142,7 @@ def execute_recovery(
     lift_mm: int = RECOVERY_LIFT_MM,
     settle_sec: float = RECOVERY_SETTLE_SEC,
     resume_motion: Optional[Callable[[], Any]] = None,
+    describe_robot_state: Optional[Callable[[], str]] = None,
 ) -> None:
     """
     plan에 따라 실제 복구 동작을 수행.
@@ -153,7 +154,18 @@ def execute_recovery(
         success=True로 오지만(명령 자체는 접수됨) 로봇이 물리적으로 전혀 안 움직이는
         경우가 있었음(Doosan 드라이버는 move_stop/move_resume이 쌍으로 설계돼 있는데
         move_resume을 호출하는 곳이 코드베이스에 없었음). None이면(기본값) 호출하지
-        않음 - 하위 호환용.
+        않음 - 하위 호환용. 주의: resume_motion() 자체가 실측으로 실패 응답을 준
+        사례가 있었음(서비스는 찾았지만 move_resume()이 false 반환) - "재개할 게
+        없어서"인지 다른 이유인지 아직 불확실해서, lift가 여전히 안 움직이는 원인을
+        더 좁히기 위해 아래 describe_robot_state를 같이 씀.
+
+    describe_robot_state: 넘겨주면(예: safe_motion.get_controller_robot_state +
+        ROBOT_STATE_NAMES를 조합한 callable, () -> str), lift 재시도가 실패할
+        때마다 컨트롤러가 실제로 보고하는 로봇 상태(STANDBY/MOVING/SAFE_STOP 등)를
+        로그에 남김. resume_motion 호출이 실패해도(응답은 왔지만 success=False)
+        movel(lift) 자체는 서비스 응답 성공을 받으면서도 z가 전혀 안 바뀌는 현상이
+        재현됐는데, 그 순간 컨트롤러 상태가 뭐였는지가 다음 원인 파악의 핵심 단서라
+        추가함. None이면(기본값) 조회하지 않음 - 하위 호환용.
 
     movel/gripper_open은 실제로는 DSR_ROBOT2.movel / openclose.gripper_open이지만,
     여기서는 주입받아 사용하므로 이 함수 자체는 하드웨어 의존 없이 테스트 가능함.
@@ -188,6 +200,9 @@ def execute_recovery(
         # 아래 movel들이 서비스 응답은 성공으로 받으면서도 실제로는 움직이지
         # 않는 문제가 있었음(위 resume_motion 인자 설명 참고).
         resume_motion()
+
+    if describe_robot_state is not None:
+        node.get_logger().info(f"[E-STOP] 복구 시작 시점 컨트롤러 상태: {describe_robot_state()}")
 
     current_x, current_y, current_z, current_rx, current_ry, current_rz = get_current_pos()
 
@@ -224,6 +239,8 @@ def execute_recovery(
         node.get_logger().error(
             f"[E-STOP][lift] 상승이 실행되지 않은 것으로 보입니다(실제 상승량 {achieved_mm:.1f}mm) - 재시도합니다."
         )
+        if describe_robot_state is not None:
+            node.get_logger().error(f"[E-STOP][lift] 실패 시점 컨트롤러 상태: {describe_robot_state()}")
     else:
         raise RuntimeError(
             f"[E-STOP] {LIFT_RETRY_COUNT}회 재시도에도 상승(lift)이 실행되지 않았습니다 - "
@@ -262,6 +279,7 @@ def check_and_recover(
     posx_factory: Callable[..., Any],
     check_hw_safety_stop: Optional[Callable[[], "tuple"]] = None,
     resume_motion: Optional[Callable[[], Any]] = None,
+    describe_robot_state: Optional[Callable[[], str]] = None,
 ) -> bool:
     """
     emergency_stop_event(threading.Event)가 걸려 있으면 복구를 수행하고 True를 반환.
@@ -281,6 +299,8 @@ def check_and_recover(
         None이면(기본값) 이 확인을 건너뜀 - 하위 호환용.
 
     resume_motion: execute_recovery()로 그대로 전달됨 - safe_motion.resume_motion 참고.
+    describe_robot_state: execute_recovery()로 그대로 전달됨 - execute_recovery의
+        describe_robot_state 설명 참고.
 
     복구 후에는 emergency_stop_event를 clear()해서 다음 루프에서 다시 걸리지 않게
     하고, "무조건 CAMERA로 보내서 재개" 정책에 따라 별도의 재가 명령 없이
@@ -315,6 +335,7 @@ def check_and_recover(
         home_pos=home_pos, camera_pos=camera_pos,
         get_current_pos=get_current_pos, posx_factory=posx_factory,
         resume_motion=resume_motion,
+        describe_robot_state=describe_robot_state,
     )
 
     if plan.action == "RETURN_TO_ORIGIN":

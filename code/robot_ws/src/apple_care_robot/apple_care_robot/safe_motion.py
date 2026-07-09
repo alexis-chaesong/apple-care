@@ -38,9 +38,23 @@ from dsr_msgs2.srv import MoveStop, MoveResume, GetRobotState
 #   0 = DR_QSTOP_STO (Quick stop, 안전 토크 차단 - 보통 재가동하려면 파트/원점 재설정 필요)
 #   1 = DR_QSTOP     (Quick stop, 토크 차단 없음)
 #   2 = DR_SSTO       (Soft stop)
-#   3 = DR_HOLD       (Hold stop - 서보 유지, 소프트웨어에서 바로 재가동 가능)
-# 우리는 "정지 후 CAMERA로 다시 재가동"이 정책이므로 HOLD를 기본으로 씀.
-STOP_MODE_HOLD = 3
+#   3 = DR_HOLD       (Hold stop - 서보 유지, 소프트웨어에서 바로 재가동 가능 "이라는
+#                       문서상 설명과 달리, 실측으로는 move_stop(HOLD) 이후 movel이
+#                       서비스 응답 성공을 받으면서도 실제로는 전혀 안 움직이는 문제가
+#                       반복 재현됨. Doosan은 HOLD 해제용으로 move_resume()을 따로
+#                       제공하는데, 그걸 호출해도(motion/move_resume) 재가동이 안 됨)
+DR_QSTOP_STO = 0
+DR_QSTOP = 1
+DR_SSTOP = 2
+DR_HOLD = 3
+
+# 자매 프로젝트 auto_dump_robot_pkg(motion_runtime.py의 stop()/request_motion_stop())는
+# HOLD를 아예 쓰지 않고 DR_QSTOP을 기본으로, 실패 시 DR_QSTOP_STO로 폴백하는 방식으로
+# 이 문제를 겪지 않고 정지 직후 movel/movej가 정상 동작함이 실기로 검증돼 있음 - 그
+# 방식을 그대로 채택함 ("정지 후 CAMERA로 다시 재가동" 정책은 QSTOP으로도 동일하게
+# 충족됨 - QSTOP은 토크를 차단하지 않으므로 소프트웨어에서 바로 새 움직임을 낼 수 있음).
+STOP_MODE_HOLD = DR_HOLD  # 하위 호환용 이름 - 더 이상 기본값으로 쓰지 않음
+STOP_MODE_DEFAULT = DR_QSTOP
 
 # 두산 컨트롤러가 system/get_robot_state 서비스로 반환하는 상태값 이름표.
 ROBOT_STATE_NAMES = {
@@ -136,7 +150,7 @@ class EmergencyStopError(RuntimeError):
     """
 
 
-def stop_motion(node, stop_mode: int = STOP_MODE_HOLD) -> bool:
+def stop_motion(node, stop_mode: int = STOP_MODE_DEFAULT) -> bool:
     """
     dsr_controller2가 제공하는 motion/move_stop 서비스를 호출해서 로봇의
     현재 동작을 실제로(하드웨어 레벨에서) 멈춘다.
@@ -297,7 +311,7 @@ def make_hw_safety_watcher(
         msg = f"컨트롤러 하드웨어 안전정지 감지({state_name}) - 즉시 정지합니다."
         node.get_logger().error(f"[safe_motion] {msg}")
         emergency_stop_event.set()
-        stop_motion_fn(node, STOP_MODE_HOLD)
+        stop_motion_fn(node, STOP_MODE_DEFAULT)
         raise EmergencyStopError(msg)
 
     return watch
@@ -317,7 +331,7 @@ def raise_if_emergency_stop(node, emergency_stop_event, stop_motion_fn=stop_moti
 
     node.get_logger().error("[safe_motion] 비상정지 감지 - 모션 정지를 요청합니다.")
 
-    stop_motion_fn(node, STOP_MODE_HOLD)
+    stop_motion_fn(node, STOP_MODE_DEFAULT)
     raise EmergencyStopError("비상정지 요청으로 동작이 중단되었습니다.")
 
 
