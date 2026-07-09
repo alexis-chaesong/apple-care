@@ -1,0 +1,6 @@
+---
+bool valid
+bool b1_occupied
+bool b2_occupied
+bool b3_occupied
+bool b4_occupied

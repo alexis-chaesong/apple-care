@@ -6,6 +6,7 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SrvAppleStatus.srv"
+  "srv/SrvBasketStatus.srv"
 )
 
 ament_export_dependencies(rosidl_default_runtime)

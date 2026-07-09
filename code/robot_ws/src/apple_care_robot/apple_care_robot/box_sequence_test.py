@@ -52,7 +52,7 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 import DR_init
 from std_msgs.msg import String
-from apple_care_msgs.srv import SrvAppleStatus
+from apple_care_msgs.srv import SrvAppleStatus, SrvBasketStatus
 from apple_care_robot.openclose import gripper_open
 from apple_care_robot.pick_helpers import (
     pick_apple, _depth_offset_for_condition, DEFAULT_PICK_ORIENTATION,
@@ -81,6 +81,22 @@ TOPIC_ROBOT_COMMAND = "/robot/command"
 # 네임스페이스 없이 여는 실제 서비스(/get_apple_status)를 영영 못 찾음
 # (pick_and_place_voice/robot_control.py의 "/get_3d_position"과 동일한 이유).
 VISION_SERVICE_NAME = "/get_apple_status"
+
+# 세컨 카메라(basket_camera 노드) -> 백엔드(basket_bridge.py)가 캐싱한 바스켓
+# 점유 상태를 배치 직전에 조회하는 서비스. VISION_SERVICE_NAME과 동일한 이유로
+# 반드시 절대 이름이어야 함.
+BASKET_SERVICE_NAME = "/get_basket_status"
+
+# 세컨 카메라/백엔드가 아직 안 켜져 있거나 서비스 호출이 실패해도 로봇 사이클이
+# 멈추지 않도록, 응답을 못 받으면 이 시간(초) 안에 포기하고 기본값(비어있음)으로
+# 넘어간다.
+BASKET_SERVICE_TIMEOUT_SEC = 1.0
+
+# 바스켓에 이미 사과가 있다고 판단됐을 때, 그 위에 그대로 얹지 않도록 옆으로
+# 살짝 옮겨서 놓는 오프셋(mm, box 로컬 x축 기준). 바스켓 실측 크기/배치가 아직
+# 확정되지 않았으므로 placeholder 값 - 실제 하드웨어에서 겹침/충돌 없이 들어가는
+# 값으로 재조정해야 함.
+BOX_OCCUPIED_OFFSET_X_MM = 40.0
 
 # decision.pose가 None으로 온 경우(비전이 좌표를 못 준 경우)에 쓰는 임시 pick 좌표.
 FALLBACK_PICK_POS_XYZ = (492.0, 13.48, 23.39)
@@ -311,6 +327,46 @@ def main(args=None):
     while not vision_client.wait_for_service(timeout_sec=3.0):
         node.get_logger().info(f"Waiting for {VISION_SERVICE_NAME} service...")
 
+    # get_apple_status와 달리 여기서는 서비스가 뜰 때까지 블로킹 대기하지 않음 -
+    # 세컨 카메라/백엔드는 아직 선택 구성 요소라, 안 켜져 있어도 로봇 사이클이
+    # "기본값(비어있음)"으로 정상 진행되어야 하기 때문 (check_basket_occupied 참고).
+    basket_client = node.create_client(SrvBasketStatus, BASKET_SERVICE_NAME)
+
+    def check_basket_occupied(box_name: str) -> bool:
+        """
+        배치 직전에 백엔드(basket_bridge.py)가 캐싱해둔 바스켓 점유 상태를 조회.
+
+        서비스가 아직 안 떠 있거나(basket_camera/backend 미기동), 응답이 없거나,
+        아직 한 번도 유효한 판정을 못 받았으면(valid=False) 항상 False(비어있음)로
+        폴백한다 - 기본은 "없는 걸로 실행"하고, 확실히 "있다"고 확인된 경우에만
+        오프셋 배치 분기를 탄다.
+        """
+        if not basket_client.service_is_ready():
+            node.get_logger().warn(
+                f"{BASKET_SERVICE_NAME} 서비스 미기동 - {box_name} 점유 여부는 "
+                "기본값(비어있음)으로 처리합니다."
+            )
+            return False
+
+        future = basket_client.call_async(SrvBasketStatus.Request())
+        rclpy.spin_until_future_complete(node, future, timeout_sec=BASKET_SERVICE_TIMEOUT_SEC)
+        response = future.result()
+        if response is None or not response.valid:
+            node.get_logger().warn(
+                f"{BASKET_SERVICE_NAME} 응답 없음/무효 - {box_name} 점유 여부는 "
+                "기본값(비어있음)으로 처리합니다."
+            )
+            return False
+
+        occupied = {
+            "b1": response.b1_occupied,
+            "b2": response.b2_occupied,
+            "b3": response.b3_occupied,
+            "b4": response.b4_occupied,
+        }.get(box_name, False)
+        node.get_logger().info(f"{box_name} 점유 상태 조회 결과: {'있음' if occupied else '없음'}")
+        return occupied
+
     def refresh_pick_pos(condition):
         """
         그립 실패 후 재시도 직전에 호출. CAMERA 위치에 서 있는 상태에서
@@ -347,11 +403,13 @@ def main(args=None):
         """
         이미 집어서 그립까지 확인해둔 사과를 목적지 박스(고정 절대좌표 box_pos)에
         놓는 사이클 (집기 자체는 여기서 하지 않음).
-        홈(안전 경유) -> 웨이포인트 -> box_pos로 이동 -> 힘제어 하강 ->
-        그리퍼 오픈 -> 퇴피 -> 웨이포인트 -> 카메라 복귀.
-        박스 안에 이미 뭔가 있는지는 비전으로 확인하지 않고, 항상 동일하게
-        box_pos까지 이동한 뒤 힘제어(force_controlled_place)로 접촉을 감지하며
-        내려감 - 그래서 이미 사과가 있어도 접촉 시점에 멈추므로 안전함.
+        홈(안전 경유) -> 웨이포인트 -> (바스켓 점유 조회) -> box_pos(또는 오프셋
+        위치)로 이동 -> 힘제어 하강 -> 그리퍼 오픈 -> 퇴피 -> 웨이포인트 -> 카메라 복귀.
+        세컨 카메라(basket_camera)/백엔드(basket_bridge.py)가 이 바스켓에 이미
+        사과가 있다고 판단하면 옆으로 오프셋을 준 위치(target_pos)로 배치하고,
+        기본(없음/서비스 미기동)이면 기존과 동일하게 box_pos 그대로 사용한다.
+        어느 쪽이든 force_controlled_place로 접촉을 감지하며 내려가므로, 오프셋이
+        정확하지 않아도 접촉 시점에 멈춰 안전함.
         """
         node.get_logger().info(f"--- Sorting to {name} ---")
 
@@ -363,11 +421,27 @@ def main(args=None):
         do_safe_movel(way_pos)
         wait(0.3)
 
+        # 세컨 카메라(basket_camera)/백엔드(basket_bridge.py)가 판단한 이 바스켓의
+        # 사과 유무를 조회해서, 이미 사과가 있으면 같은 자리에 그대로 얹지 않고
+        # 옆으로 오프셋을 준 위치에 놓는다. 기본(서비스 미기동/무효 응답 포함)은
+        # "없음"으로 간주해 기존과 동일하게 box_pos 그대로 사용.
+        occupied = check_basket_occupied(name)
+        if occupied:
+            bx, by, bz, brx, bry, brz = box_pos
+            target_pos = posx(bx + BOX_OCCUPIED_OFFSET_X_MM, by, bz, brx, bry, brz)
+            node.get_logger().info(
+                f"{name} 바스켓에 이미 사과가 있는 것으로 판단 - "
+                f"오프셋({BOX_OCCUPIED_OFFSET_X_MM}mm) 배치로 전환합니다."
+            )
+            status_bus.publish_safety("BASKET_OCCUPIED", f"{name} 이미 사과 있음 - 오프셋 배치")
+        else:
+            target_pos = box_pos
+
         node.get_logger().info(f"Move to {name}")
-        do_safe_movel(box_pos)
+        do_safe_movel(target_pos)
         wait(0.3)
         contact_ok = force_controlled_place(
-            node, box_pos,
+            node, target_pos,
             emergency_stop_event=emergency_stop, stop_node=comm_node,
             check_hw_safety_stop=check_hw_safety_stop,
         )
@@ -391,7 +465,7 @@ def main(args=None):
 
             wait(1.0)
 
-            retreat_x, retreat_y, retreat_z, rx, ry, rz = box_pos
+            retreat_x, retreat_y, retreat_z, rx, ry, rz = target_pos
             retreat_pos = posx(retreat_x, retreat_y, retreat_z + 50, rx, ry, rz)
             do_safe_movel(retreat_pos)
             wait(0.2)

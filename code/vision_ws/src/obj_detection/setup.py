@@ -12,6 +12,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/resource', glob.glob('resource/*.pt')),
+        ('share/' + package_name + '/launch', glob.glob('launch/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -28,6 +29,8 @@ setup(
         'console_scripts': [
             'object_detection = obj_detection.detection:main',
             'prepare_camera = obj_detection.prepare_camera:main',
+            'basket_camera = obj_detection.basket_camera:main',
+            'basket_camera_static_test = obj_detection.basket_camera_static_test:main',
         ],
     },
 )
