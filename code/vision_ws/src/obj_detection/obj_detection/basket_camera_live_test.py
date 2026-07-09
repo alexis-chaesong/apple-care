@@ -42,7 +42,7 @@ def main(args=None):
         description="바스켓 카메라(웹캠) 배정/점유 판단을 실시간 창으로 확인"
     )
     parser.add_argument(
-        "--device_index", type=int, default=0,
+        "--device_index", type=int, default=39,
         help="바스켓 조망용 웹캠의 /dev/videoN 인덱스 "
              "(basket_camera.py의 device_index 파라미터와 동일한 값을 쓸 것).",
     )
@@ -91,8 +91,8 @@ def main(args=None):
                 continue
 
             detections = model.get_all_detections(frame)
-            basket_assignment, valid = assign_baskets(detections)
-            occupancy = compute_occupancy(detections, basket_assignment)
+            basket_assignment, valid, basket_labels = assign_baskets(detections)
+            occupancy = compute_occupancy(detections, basket_assignment, basket_labels)
 
             if occupancy != last_occupancy:
                 detected = sum(1 for b in basket_assignment.values() if b is not None)

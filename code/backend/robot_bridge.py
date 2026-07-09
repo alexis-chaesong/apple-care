@@ -56,6 +56,12 @@ TOPIC_DEBUG_IMAGE = "/obj_detection/debug_image"
 # JPEG 인코딩 품질 (0~100). 웹소켓으로 계속 흘려보내야 하므로 화질보다 전송 크기를 우선함
 DEBUG_IMAGE_JPEG_QUALITY = 70
 
+# HMI 화면에 실제로 그려지는 크기(hmi_app/view/dashboard.py의 cam_box_w/h)보다
+# 원본 해상도가 훨씬 커서(예: 1280x720), 화면에서 어차피 축소해서 보여줄 걸
+# 원본 그대로 보내면 대역폭 낭비임. 인코딩 전에 이 너비 기준으로 먼저
+# 축소해서 전송량 자체를 줄인다 (비율은 유지, 세로는 자동 계산).
+DEBUG_IMAGE_MAX_WIDTH = 640
+
 # 로봇팀의 motion_planner_node.py가 실제로 구독하는 토픽 (/robot/command와는
 # 완전히 다른 스키마). publish_command()와 별개로 publish_decision_result()가
 # 전용으로 사용함 (2단계 조사 결과: motion_planner_node.py의 decision_callback()이
@@ -93,6 +99,15 @@ def _split_colon(raw: str) -> tuple[str, str]:
         head, _, tail = raw.partition(":")
         return head, tail
     return raw, ""
+
+
+def _resize_for_transport(frame, max_width: int):
+    """가로 max_width 기준으로 비율 유지 축소 (이미 그보다 작으면 그대로 반환)."""
+    h, w = frame.shape[:2]
+    if w <= max_width:
+        return frame
+    scale = max_width / w
+    return cv2.resize(frame, (max_width, int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
 class RobotBridgeManager:
@@ -441,6 +456,7 @@ class RobotBridgeManager:
         """
         try:
             frame = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            frame = _resize_for_transport(frame, DEBUG_IMAGE_MAX_WIDTH)
             ok, jpeg = cv2.imencode(
                 '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, DEBUG_IMAGE_JPEG_QUALITY]
             )

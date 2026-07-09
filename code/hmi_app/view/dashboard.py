@@ -5,6 +5,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from datetime import datetime
 import cv2  # OpenCV 추가
 import numpy as np
@@ -86,7 +87,17 @@ class VLASorterDashboard:
 
         self.counts = {"판매": 0, "못난이": 0, "가공용": 0, "폐기": 0}
         self.is_estopped = False
-        self.current_frame = None  
+        self.current_frame = None
+
+        # basket_camera/obj_detection 노드가 꺼지거나 죽으면 해당 CAMERA_FRAME이
+        # 더 이상 안 오는데, 예전에는 라벨에 마지막으로 그렸던 이미지가 그대로
+        # 남아서 마치 계속 살아있는 것처럼 보이는 문제가 있었음. 마지막으로
+        # 프레임을 받은 시각을 기록해두고 poll_ws_queue에서 주기적으로 확인해서,
+        # 일정 시간 이상 새 프레임이 없으면 대기 화면으로 되돌린다.
+        self._basket_frame_last_seen = None
+        self._basket_frame_stale = False
+        self._main_frame_last_seen = None
+        self._main_frame_stale = False
 
         self.hitl_fruit_type = None 
         self.hitl_condition = None 
@@ -160,14 +171,47 @@ class VLASorterDashboard:
             font=font or self.FONT_BODY_BOLD, bd=0, relief="flat", pady=10, cursor="hand2", 
         ) 
 
+    # 카메라 노드가 죽거나 꺼진 뒤 이만큼(초) 새 프레임이 없으면 마지막 프레임을
+    # 화면에 그대로 두지 않고 대기 화면으로 되돌린다.
+    CAMERA_FRAME_STALE_TIMEOUT_SEC = 2.0
+
     def poll_ws_queue(self):
         try:
             while True:
-                msg = self.ws_queue.get_nowait() 
-                self._handle_ws_message(msg) 
-        except queue.Empty: 
-            pass 
-        self.root.after(100, self.poll_ws_queue) 
+                msg = self.ws_queue.get_nowait()
+                self._handle_ws_message(msg)
+        except queue.Empty:
+            pass
+        self._check_basket_frame_stale()
+        self._check_main_frame_stale()
+        self.root.after(100, self.poll_ws_queue)
+
+    def _check_basket_frame_stale(self):
+        if self._basket_frame_stale or self._basket_frame_last_seen is None:
+            return
+        if time.monotonic() - self._basket_frame_last_seen < self.CAMERA_FRAME_STALE_TIMEOUT_SEC:
+            return
+        self._basket_frame_stale = True
+        if self.lbl_c720 is not None and self.lbl_c720.winfo_exists():
+            self.lbl_c720.config(
+                image="",
+                text="⚠ Basket Camera 연결 끊김\nbasket_camera 노드를 실행해 연결하세요.",
+            )
+            self.lbl_c720.imgtk = None
+
+    def _check_main_frame_stale(self):
+        if self._main_frame_stale or self._main_frame_last_seen is None:
+            return
+        if time.monotonic() - self._main_frame_last_seen < self.CAMERA_FRAME_STALE_TIMEOUT_SEC:
+            return
+        self._main_frame_stale = True
+        if self.lbl_webcam is not None and self.lbl_webcam.winfo_exists():
+            self.lbl_webcam.config(
+                image="",
+                text="⚠ Pick Camera 연결 끊김\nobj_detection(RealSense) 노드를 실행해 연결하세요.",
+                font=self.FONT_MONO_SMALL, fg=self.COLOR_TEXT_MUTED, justify="left",
+            )
+            self.lbl_webcam.imgtk = None
 
     def _handle_ws_message(self, msg):
         msg_type = msg.get("type") 
@@ -265,9 +309,11 @@ class VLASorterDashboard:
                 jpg_bytes = base64.b64decode(msg.get("image", "")) 
                 jpg_array = np.frombuffer(jpg_bytes, dtype=np.uint8) 
                 frame = cv2.imdecode(jpg_array, cv2.IMREAD_COLOR) 
-                if frame is not None: 
-                    self.current_frame = frame  
-                    self.render_camera_frame(frame, self.lbl_webcam, self.cam_box_w, self.cam_box_h) 
+                if frame is not None:
+                    self.current_frame = frame
+                    self._main_frame_last_seen = time.monotonic()
+                    self._main_frame_stale = False
+                    self.render_camera_frame(frame, self.lbl_webcam, self.cam_box_w, self.cam_box_h)
                     
                     if self.hitl_popup and self.hitl_cam_label:
                         self.render_camera_frame(frame, self.hitl_cam_label, 360, 240)
@@ -283,6 +329,8 @@ class VLASorterDashboard:
                 jpg_array = np.frombuffer(jpg_bytes, dtype=np.uint8)
                 frame = cv2.imdecode(jpg_array, cv2.IMREAD_COLOR)
                 if frame is not None:
+                    self._basket_frame_last_seen = time.monotonic()
+                    self._basket_frame_stale = False
                     self.render_camera_frame(
                         frame, self.lbl_c720, self.basket_cam_box_w, self.basket_cam_box_h
                     )

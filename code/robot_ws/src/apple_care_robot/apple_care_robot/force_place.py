@@ -13,7 +13,7 @@ import time
 from apple_care_robot.safe_motion import raise_if_emergency_stop, make_hw_safety_watcher
 
 DOWN_SPEED_VEL = 30        # 내려가는 속도 (mm/s)
-DOWN_SPEED_ACC = 20        # 가속도
+DOWN_SPEED_ACC = 25        # 가속도
 
 # 접촉을 못 찾았을 때 최대 몇 mm까지 내려갈지 (안전 마진 확보).
 #
@@ -25,7 +25,7 @@ DOWN_SPEED_ACC = 20        # 가속도
 # 15mm로 낮추면서, 그만큼(15mm) 여기도 같이 늘려서 접촉면 기준 탐색 깊이를
 # 원래 150mm로 복원함(150 -> 165). TIMEOUT_SEC은 이 값에서 자동 계산되므로
 # 늘어난 거리만큼 시간 여유도 같이 늘어남.
-MAX_DOWN_DISTANCE = 165
+MAX_DOWN_DISTANCE = 175
 FORCE_THRESHOLD = 4        # 힘 변화량 임계값 (N) - 필요시 8~15 사이로 튜닝
 
 # 타임아웃은 항상 "최대 하강 시간"보다 여유 있게 잡아야 함.
