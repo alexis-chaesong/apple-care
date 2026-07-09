@@ -77,12 +77,37 @@ CORNER_APPROACH_HOVER_CLEARANCE_MM = 50.0
 CORNER_PICK_INSET_MM = 10.0
 
 
+def is_within_tray_bounds(x, y) -> bool:
+    """(x, y)가 트레이 작업 영역(TRAY_X_MIN_MM~MAX_MM, TRAY_Y_MIN_MM~MAX_MM) 안에
+    있는지 확인한다.
+
+    실측으로 확인된 문제: vision이 준 위치가 이 트레이 범위를 한참 벗어난 경우
+    (예: x가 TRAY_X_MAX_MM보다 100mm 이상 큼), _nearest_wall_escape_dir()의 거리
+    계산이 "경계를 얼마나 벗어났는지"를 나타내는 음수값도 WALL_PROXIMITY_MARGIN_MM
+    이내로 오판해서 "벽 근처"로 잘못 처리하는 버그가 있었음(범위 안/벽 근처/범위
+    밖 세 경우를 구분하지 못했음). 그 결과 실제로는 존재하지 않는 위치로 접근을
+    시도하다 파지가 반복 실패하는 사례가 있었음 - 그래서 애초에 파지 시도 자체를
+    이 범위 안으로만 제한하기 위해 별도로 둠(호출부: box_sequence_test.py).
+    """
+    return TRAY_X_MIN_MM <= x <= TRAY_X_MAX_MM and TRAY_Y_MIN_MM <= y <= TRAY_Y_MAX_MM
+
+
 def _nearest_wall_escape_dir(x, y):
     """
     (x, y)가 트레이 경계 중 어느 벽에라도 WALL_PROXIMITY_MARGIN_MM 이내로
     가까우면, 그 벽에서 트레이 중심 쪽으로 벗어나는 정규화된 방향(ex, ey)과
     "모서리(두 벽에 동시에 가까움)인지" 여부를 반환. 모서리면 두 방향을 합성해
     대각선 방향으로 줌. 벽 근처가 아니면 (None, None, False).
+
+    이 함수는 (x, y)가 트레이 범위 "안"(is_within_tray_bounds)이라는 전제 하에
+    호출돼야 함 - 범위를 이미 벗어난 좌표(예: x > TRAY_X_MAX_MM)를 넣으면 해당
+    축의 margin이 음수가 되는데, 실측으로 확인된 버그: 예전엔 `dist <=
+    WALL_PROXIMITY_MARGIN_MM` 조건이 음수도 그냥 통과시켜서 "벽에 딱 붙어있음"과
+    "범위를 한참 벗어남"을 구분 못 했음(둘 다 "벽 근처"로 오판). 그래서 하한을
+    0으로 둬서, 이미 경계를 넘어선 축은 "근접"으로 안 치도록 막음. 정상 흐름에서는
+    box_sequence_test.py가 pick_apple() 호출 전에 is_within_tray_bounds()로 이미
+    걸러주므로 이 하한에 실제로 걸릴 일은 없어야 정상이지만, 이 함수 자체의
+    불변조건을 명확히 하기 위해 둠.
     """
     margins = {
         "x_min": (x - TRAY_X_MIN_MM, (1.0, 0.0)),
@@ -91,7 +116,10 @@ def _nearest_wall_escape_dir(x, y):
         "y_max": (TRAY_Y_MAX_MM - y, (0.0, -1.0)),
     }
 
-    close = [(dist, direction) for dist, direction in margins.values() if dist <= WALL_PROXIMITY_MARGIN_MM]
+    close = [
+        (dist, direction) for dist, direction in margins.values()
+        if 0 <= dist <= WALL_PROXIMITY_MARGIN_MM
+    ]
     if not close:
         return None, None, False
 
