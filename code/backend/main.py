@@ -23,6 +23,7 @@ from database import init_db
 from models import VisionFeatureIn
 from robot_bridge import bridge_manager
 from vision_bridge import vision_bridge_manager
+from basket_bridge import basket_bridge_manager
 from connection_manager import connection_manager
 from services.decision_planner import decide
 from services.voice_policy import run_voice_policy_command
@@ -86,9 +87,10 @@ async def _queue_consumer_loop() -> None:
             try:
                 msg_type = raw_ros_data.get("type")
 
-                # CAMERA_FRAME은 로봇 상태 캐시(latest_status)와 무관한 별도 스트림이라,
-                # 캐시 갱신/ROBOT_STATUS 누적 브로드캐스트 로직을 타지 않고 그대로 즉시 전달만 함
-                if msg_type == "CAMERA_FRAME":
+                # CAMERA_FRAME/BASKET_CAMERA_FRAME은 로봇 상태 캐시(latest_status)와
+                # 무관한 별도 스트림이라, 캐시 갱신/ROBOT_STATUS 누적 브로드캐스트
+                # 로직을 타지 않고 그대로 즉시 전달만 함
+                if msg_type in ("CAMERA_FRAME", "BASKET_CAMERA_FRAME"):
                     await connection_manager.broadcast(raw_ros_data)
                     continue
 
@@ -259,6 +261,9 @@ async def lifespan(app: FastAPI):
         # 2-1) Vision Bridge 가동 (get_apple_status 서비스를 폴링해서 vision_queue에 적재)
         vision_bridge_manager.start_bridge(current_loop, vision_queue)
 
+        # 2-2) Basket Bridge 가동 (/basket_status 토픽 구독 + get_basket_status 서비스 호스팅)
+        basket_bridge_manager.start_bridge(current_loop, broadcast_queue)
+
         # 3) 백그라운드 큐 소비자 가동
         _consumer_task = asyncio.create_task(_queue_consumer_loop())
         # : 앞서 만든 소비자 루프(_queue_consumer_loop)를 백그라운드에서 비동기로 독립시켜 상시 구동
@@ -313,6 +318,7 @@ async def lifespan(app: FastAPI):
         # vision_bridge_manager를 먼저 정리하고(rclpy.shutdown()을 호출하지 않으므로 순서 무관하지만
         # 관례상 마지막에 전체 rclpy 컨텍스트를 내리는 bridge_manager보다 먼저 정리함), 그다음 bridge_manager.shutdown()
         vision_bridge_manager.shutdown()
+        basket_bridge_manager.shutdown()
         bridge_manager.shutdown() # ROS 2 스레드 및 rclpy 안전 종료
         # 서버가 꺼질 때 백그라운드 태스크를 먼저 취소하고, ROS 2 스레드까지 안전하게 셧다운(bridge_manager.shutdown())하여 좀비 프로세스가 남는 것을 원천 차단
 

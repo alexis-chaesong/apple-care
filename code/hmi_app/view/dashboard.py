@@ -271,8 +271,23 @@ class VLASorterDashboard:
                     
                     if self.hitl_popup and self.hitl_cam_label:
                         self.render_camera_frame(frame, self.hitl_cam_label, 360, 240)
-            except Exception as e:  
-                self.log_message(f"[CAMERA_FRAME] 디코딩 실패: {e}") 
+            except Exception as e:
+                self.log_message(f"[CAMERA_FRAME] 디코딩 실패: {e}")
+
+        elif msg_type == "BASKET_CAMERA_FRAME":
+            # basket_bridge.py가 /basket_camera/debug_image(바스켓 b1~b4 bbox +
+            # 사과 유무 오버레이)를 중계하는 메시지. Cam 1(CAMERA_FRAME)과 완전히
+            # 별개의 스트림이라 Cam 2 라벨(self.lbl_c720)에만 그린다.
+            try:
+                jpg_bytes = base64.b64decode(msg.get("image", ""))
+                jpg_array = np.frombuffer(jpg_bytes, dtype=np.uint8)
+                frame = cv2.imdecode(jpg_array, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    self.render_camera_frame(
+                        frame, self.lbl_c720, self.basket_cam_box_w, self.basket_cam_box_h
+                    )
+            except Exception as e:
+                self.log_message(f"[BASKET_CAMERA_FRAME] 디코딩 실패: {e}")
 
     def create_top_bar(self):
         self.top_bar = tk.Frame(self.root, bg=self.COLOR_SIDEBAR, height=60) 
@@ -376,18 +391,32 @@ class VLASorterDashboard:
 
         frame_c720 = self._card_frame(cam_frame)
         frame_c720.pack(side="right", fill="both", expand=True, padx=(5, 0))
-        self._section_header(frame_c720, "Cam 2: Logitech C720 (Side View)", self.COLOR_ORANGE).pack(anchor="w", padx=15, pady=(12, 8))
-        lbl_c720 = tk.Label(
-            frame_c720, text="Side Defect Scan Area\n- Secondary inspection ready.\n- Normal Angle Alignment.",
+        self._section_header(frame_c720, "Cam 2: Basket Camera (B1~B4 Occupancy)", self.COLOR_ORANGE).pack(anchor="w", padx=15, pady=(12, 8))
+
+        basket_cam_container = tk.Frame(frame_c720, bg="#000000")
+        basket_cam_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        basket_cam_container.pack_propagate(False)
+        self.basket_cam_container = basket_cam_container
+
+        self.basket_cam_box_w = 480
+        self.basket_cam_box_h = 360
+        basket_cam_container.bind("<Configure>", self.on_basket_cam_container_resize)
+
+        self.lbl_c720 = tk.Label(
+            basket_cam_container, text="Basket Camera 연결 대기 중...\n- basket_camera 노드가 켜지면 자동으로 표시됩니다.",
             font=self.FONT_MONO_SMALL, fg=self.COLOR_TEXT_MUTED, bg="#000000", justify="left",
         )
-        lbl_c720.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        self.lbl_c720.pack(fill="both", expand=True)
 
         self.create_counter_table(parent)
 
     def on_webcam_container_resize(self, event):
-        self.cam_box_w = max(event.width, 10) 
-        self.cam_box_h = max(event.height, 10) 
+        self.cam_box_w = max(event.width, 10)
+        self.cam_box_h = max(event.height, 10)
+
+    def on_basket_cam_container_resize(self, event):
+        self.basket_cam_box_w = max(event.width, 10)
+        self.basket_cam_box_h = max(event.height, 10)
 
     def render_camera_frame(self, frame, label_widget, box_w, box_h):
         if label_widget is None or not label_widget.winfo_exists(): 
