@@ -354,32 +354,32 @@ class VLASorterDashboard:
         cam_frame = tk.Frame(parent, bg=self.COLOR_BG) 
         cam_frame.pack(fill="both", expand=True, pady=(0, 10)) 
 
-        self.frame_d455 = self._card_frame(cam_frame) 
-        self.frame_d455.pack(side="left", fill="both", expand=True, padx=(0, 5)) 
-        self._section_header(self.frame_d455, "Cam 1: D455 + YOLO Detection (Real-time View)", self.COLOR_BLUE).pack(anchor="w", padx=15, pady=(12, 8)) 
+        self.frame_d455 = self._card_frame(cam_frame)
+        self.frame_d455.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        self._section_header(self.frame_d455, "Cam 1: D455 + YOLO Detection (Real-time View)", self.COLOR_BLUE).pack(anchor="w", padx=15, pady=(12, 8))
 
-        webcam_container = tk.Frame(self.frame_d455, bg="#000000") 
-        webcam_container.pack(fill="both", expand=True, padx=15, pady=(0, 15)) 
-        webcam_container.pack_propagate(False) 
-        self.webcam_container = webcam_container 
+        webcam_container = tk.Frame(self.frame_d455, bg="#000000")
+        webcam_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        webcam_container.pack_propagate(False)
+        self.webcam_container = webcam_container
 
-        self.cam_box_w = 480 
-        self.cam_box_h = 360 
-        webcam_container.bind("<Configure>", self.on_webcam_container_resize) 
+        self.cam_box_w = 480
+        self.cam_box_h = 360
+        webcam_container.bind("<Configure>", self.on_webcam_container_resize)
 
-        self.lbl_webcam = tk.Label(webcam_container, bg="#000000") 
-        self.lbl_webcam.pack(fill="both", expand=True) 
+        self.lbl_webcam = tk.Label(webcam_container, bg="#000000")
+        self.lbl_webcam.pack(fill="both", expand=True)
 
-        frame_c720 = self._card_frame(cam_frame) 
-        frame_c720.pack(side="right", fill="both", expand=True, padx=(5, 0)) 
-        self._section_header(frame_c720, "Cam 2: Logitech C720 (Side View)", self.COLOR_ORANGE).pack(anchor="w", padx=15, pady=(12, 8)) 
-        lbl_c720 = tk.Label( 
-            frame_c720, text="Side Defect Scan Area\n- Secondary inspection ready.\n- Normal Angle Alignment.", 
-            font=self.FONT_MONO_SMALL, fg=self.COLOR_TEXT_MUTED, bg="#000000", justify="left", 
-        ) 
-        lbl_c720.pack(fill="both", expand=True, padx=15, pady=(0, 15)) 
+        frame_c720 = self._card_frame(cam_frame)
+        frame_c720.pack(side="right", fill="both", expand=True, padx=(5, 0))
+        self._section_header(frame_c720, "Cam 2: Logitech C720 (Side View)", self.COLOR_ORANGE).pack(anchor="w", padx=15, pady=(12, 8))
+        lbl_c720 = tk.Label(
+            frame_c720, text="Side Defect Scan Area\n- Secondary inspection ready.\n- Normal Angle Alignment.",
+            font=self.FONT_MONO_SMALL, fg=self.COLOR_TEXT_MUTED, bg="#000000", justify="left",
+        )
+        lbl_c720.pack(fill="both", expand=True, padx=15, pady=(0, 15))
 
-        self.create_counter_table(parent) 
+        self.create_counter_table(parent)
 
     def on_webcam_container_resize(self, event):
         self.cam_box_w = max(event.width, 10) 
