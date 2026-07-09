@@ -87,9 +87,10 @@ async def _queue_consumer_loop() -> None:
             try:
                 msg_type = raw_ros_data.get("type")
 
-                # CAMERA_FRAME은 로봇 상태 캐시(latest_status)와 무관한 별도 스트림이라,
-                # 캐시 갱신/ROBOT_STATUS 누적 브로드캐스트 로직을 타지 않고 그대로 즉시 전달만 함
-                if msg_type == "CAMERA_FRAME":
+                # CAMERA_FRAME/BASKET_CAMERA_FRAME은 로봇 상태 캐시(latest_status)와
+                # 무관한 별도 스트림이라, 캐시 갱신/ROBOT_STATUS 누적 브로드캐스트
+                # 로직을 타지 않고 그대로 즉시 전달만 함
+                if msg_type in ("CAMERA_FRAME", "BASKET_CAMERA_FRAME"):
                     await connection_manager.broadcast(raw_ros_data)
                     continue
 

@@ -18,6 +18,7 @@ vision_bridge.py와의 차이: vision은 요청-응답 서비스(get_apple_statu
 그대로 돌려주기만 하는 서비스 서버다 (새로 계산하지 않음).
 """
 
+import base64
 import json
 import logging
 import threading
@@ -25,10 +26,13 @@ import time
 from asyncio import AbstractEventLoop, Queue, QueueFull
 from typing import Optional
 
+import cv2
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from sensor_msgs.msg import Image
 from std_msgs.msg import String
+from cv_bridge import CvBridge
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +52,15 @@ except ModuleNotFoundError:
 
 ROS_NODE_NAME = "fastapi_basket_bridge"
 TOPIC_BASKET_STATUS = "/basket_status"
+# basket_camera.py가 publish하는 바스켓 bbox + 사과 유무 오버레이 디버그 이미지
+# (obj_detection/debug_image를 robot_bridge.py가 CAMERA_FRAME으로 중계하는 것과
+# 동일한 패턴 - 여기서는 HMI의 "Cam 2" 자리로 보낼 BASKET_CAMERA_FRAME으로 중계).
+TOPIC_DEBUG_IMAGE = "/basket_camera/debug_image"
 SERVICE_NAME = "get_basket_status"
 SPIN_TIMEOUT_SEC = 0.1
+
+# 웹소켓으로 계속 흘려보내야 하므로 화질보다 전송 크기를 우선함 (robot_bridge.py와 동일)
+DEBUG_IMAGE_JPEG_QUALITY = 70
 
 BASKET_NAMES = ["b1", "b2", "b3", "b4"]
 
@@ -91,6 +102,12 @@ class BasketBridgeManager:
         )
         self.node.create_service(
             SrvBasketStatus, SERVICE_NAME, self._handle_get_basket_status
+        )
+
+        self.cv_bridge = CvBridge()
+        self.node.create_subscription(
+            Image, TOPIC_DEBUG_IMAGE, self._debug_image_callback,
+            1,  # 이미지는 크므로 큐 깊이를 얕게 둬서 항상 최신 프레임만 유지
         )
 
         self.executor = SingleThreadedExecutor()
@@ -159,6 +176,31 @@ class BasketBridgeManager:
             "payload": dict(self._state),
             "valid": self._valid,
             "timestamp": payload.get("timestamp", time.time()),
+        })
+
+    def _debug_image_callback(self, msg: Image) -> None:
+        """/basket_camera/debug_image 수신 -> JPEG+base64로 압축해 HMI로 중계.
+
+        robot_bridge.py의 _debug_image_callback(픽 카메라용 CAMERA_FRAME)과
+        동일한 이유(raw Image를 그대로 JSON에 실으면 프레임당 수백KB~1MB라
+        웹소켓/큐가 감당 못함)로 반드시 JPEG 압축 후 전달한다."""
+        try:
+            frame = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            ok, jpeg = cv2.imencode(
+                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, DEBUG_IMAGE_JPEG_QUALITY]
+            )
+            if not ok:
+                logger.warning("basket 디버그 이미지 JPEG 인코딩 실패")
+                return
+            b64_image = base64.b64encode(jpeg.tobytes()).decode('ascii')
+        except Exception:  # noqa: BLE001
+            logger.error("basket 디버그 이미지 처리 중 예외 발생", exc_info=True)
+            return
+
+        self._dispatch({
+            "type": "BASKET_CAMERA_FRAME",
+            "image": b64_image,
+            "timestamp": time.time(),
         })
 
     def _handle_get_basket_status(self, request, response):
