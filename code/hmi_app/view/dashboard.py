@@ -37,22 +37,22 @@ DESTINATION_TO_CATEGORY = {v: k for k, v in CATEGORY_TO_DESTINATION.items()}
 
 
 class VLASorterDashboard:
-    # ── 시스템 오리지널 다크 테마 팔레트 고정 ──────────────────────────
-    COLOR_BG = "#222631"          
-    COLOR_SIDEBAR = "#2b3140"     
-    COLOR_CARD = "#343b4d"        
-    COLOR_CARD_DARK = "#1b1e26"   
-    COLOR_ROW = "#2a303f"         
-    COLOR_BORDER = "#49536d"      
-    COLOR_TEXT = "#ffffff"        
-    COLOR_TEXT_MUTED = "#b2bdce"  
-    COLOR_TEXT_DIM = "#8896ab"    
-    COLOR_BLUE = "#5caeff"        
-    COLOR_BLUE_DEEP = "#228be6"   
-    COLOR_GREEN = "#2ecc71"       
-    COLOR_ORANGE = "#ff9f43"      
-    COLOR_RED = "#ff4d6d"         
-    COLOR_EMERGENCY_BG = "#4a1512"  # 오리지널 어두운 버건디 레드
+    # ── iOS 시스템 컬러 기반 라이트 테마 ──────────────────────────
+    COLOR_BG = "#F2F2F7"          # iOS systemGroupedBackground
+    COLOR_SIDEBAR = "#FFFFFF"
+    COLOR_CARD = "#FFFFFF"
+    COLOR_CARD_DARK = "#E9E9EB"   # 로그창/입력창 등 인셋 박스 (iOS systemGray5)
+    COLOR_ROW = "#F2F2F7"
+    COLOR_BORDER = "#D1D1D6"      # iOS separator
+    COLOR_TEXT = "#1C1C1E"        # iOS label
+    COLOR_TEXT_MUTED = "#6E6E73"  # iOS secondaryLabel
+    COLOR_TEXT_DIM = "#AEAEB2"    # iOS tertiaryLabel
+    COLOR_BLUE = "#007AFF"        # iOS systemBlue
+    COLOR_BLUE_DEEP = "#0060DF"
+    COLOR_GREEN = "#34C759"       # iOS systemGreen
+    COLOR_ORANGE = "#FF9500"      # iOS systemOrange
+    COLOR_RED = "#FF3B30"         # iOS systemRed
+    COLOR_EMERGENCY_BG = "#7A0C0C"  # 진한 알림용 레드 (긴급 상황 강조 유지)
 
     FONT_TITLE = ("NanumGothic", 20, "bold") 
     FONT_SECTION = ("NanumGothic", 13, "bold") 
@@ -84,7 +84,7 @@ class VLASorterDashboard:
         self.root.title("RGB-D Multi-View 기반 예외 농산물 판단 및 로봇 분류 시스템")
         self.root.configure(bg=self.COLOR_BG) 
 
-        self.counts = {"판매": 124, "못난이": 42, "가공용": 15, "폐기": 8} 
+        self.counts = {"판매": 0, "못난이": 0, "가공용": 0, "폐기": 0}
         self.is_estopped = False
         self.current_frame = None  
 
@@ -115,8 +115,12 @@ class VLASorterDashboard:
         self.create_frames()
         self.show_frame("monitor") 
         
-        self.center_window(1400, 850) 
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing) 
+        self.center_window(1400, 850)
+        # 어떤 해상도로 줄여도 사이드바/카드 텍스트가 겹치거나 잘리지 않도록
+        # 화면 구성이 무너지지 않는 최소 크기를 강제한다 (그 아래로는 스크롤/축소 대신
+        # 창 자체가 더 안 줄어들게 막는 게 산업용 HMI에서 더 안전한 선택).
+        self.root.minsize(1180, 720)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         self.log_message("System initialized. UI navigation elements loaded.") 
 
@@ -320,7 +324,7 @@ class VLASorterDashboard:
         lbl_div = tk.Frame(self.side_bar, bg=self.COLOR_BORDER, height=1) 
         lbl_div.pack(fill="x", pady=20, padx=15) 
 
-        self.btn_hitl_wait = self._flat_button(self.side_bar, "작업자 지시\n대기 (테스트)", self.COLOR_ORANGE, "#e08c30") 
+        self.btn_hitl_wait = self._flat_button(self.side_bar, "작업자 지시\n대기 (테스트)", self.COLOR_ORANGE, "#C76E00", fg="white")
         self.btn_hitl_wait.configure(height=3, command=self.trigger_hitl_popup) 
         self.btn_hitl_wait.pack(fill="x", side="bottom", padx=10, pady=(5, 20)) 
 
@@ -453,16 +457,16 @@ class VLASorterDashboard:
         btn_row = tk.Frame(ctrl_frame, bg=self.COLOR_CARD) 
         btn_row.pack(fill="x", padx=20, pady=(0, 20)) 
 
-        self.btn_main_start = self._flat_button(btn_row, "START ROBOT SYSTEM", self.COLOR_GREEN, "#00c77b", fg="#14171c") 
-        self.btn_main_start.configure(width=22, command=self.on_start_robot) 
+        self.btn_main_start = self._flat_button(btn_row, "START ROBOT SYSTEM", self.COLOR_GREEN, "#248A3D", fg="white")
+        self.btn_main_start.configure(width=22, command=self.on_start_robot)
         self.btn_main_start.pack(side="left", padx=(0, 12), expand=True, fill="x")
 
-        self.btn_main_pause = self._flat_button(btn_row, "PAUSE ROBOT MOTION", self.COLOR_ORANGE, "#e08c30", fg="#14171c") 
-        self.btn_main_pause.configure(width=22, command=self.on_pause_robot) 
+        self.btn_main_pause = self._flat_button(btn_row, "PAUSE ROBOT MOTION", self.COLOR_ORANGE, "#C76E00", fg="white")
+        self.btn_main_pause.configure(width=22, command=self.on_pause_robot)
         self.btn_main_pause.pack(side="left", padx=(0, 12), expand=True, fill="x")
 
-        self.btn_main_estop = self._flat_button(btn_row, "EMERGENCY STOP", self.COLOR_RED, "#c9302c", fg="#14171c") 
-        self.btn_main_estop.configure(width=22, command=self.emergency_stop) 
+        self.btn_main_estop = self._flat_button(btn_row, "EMERGENCY STOP", self.COLOR_RED, "#C0281F", fg="white")
+        self.btn_main_estop.configure(width=22, command=self.emergency_stop)
         self.btn_main_estop.pack(side="left", expand=True, fill="x")
 
         self.create_joint_override_panel(container) 
@@ -559,21 +563,21 @@ class VLASorterDashboard:
         btn_zone.pack(fill="x", padx=15, pady=(0, 15)) 
 
         # 하단 조작계 버튼 색상 상시 고정 유지
-        btn_open = self._flat_button(btn_zone, "그리퍼 개방 (OPEN)", "#228be6", "#228be6")
+        btn_open = self._flat_button(btn_zone, "그리퍼 개방 (OPEN)", "#007AFF", "#0051D0")
         btn_open.configure(command=lambda: self.control_hardware_action("그리퍼 OPEN", "OPEN"))
         btn_open.pack(side="left", expand=True, fill="x", padx=(0, 6))
 
-        btn_close = self._flat_button(btn_zone, "그리퍼 파지 (CLOSE)", "#1c7ed6", "#1c7ed6")
+        btn_close = self._flat_button(btn_zone, "그리퍼 파지 (CLOSE)", "#0051D0", "#00308F")
         btn_close.configure(command=lambda: self.control_hardware_action("그리퍼 CLOSE", "CLOSE"))
         btn_close.pack(side="left", expand=True, fill="x", padx=(0, 6))
 
-        btn_movej = self._flat_button(btn_zone, "관절각 일괄 전송 (MoveJ)", "#15aabf", "#15aabf") 
-        btn_movej.configure(command=self.send_all_joints_command) 
-        btn_movej.pack(side="left", expand=True, fill="x", padx=(0, 6)) 
+        btn_movej = self._flat_button(btn_zone, "관절각 일괄 전송 (MoveJ)", "#30B0C7", "#2694A8")
+        btn_movej.configure(command=self.send_all_joints_command)
+        btn_movej.pack(side="left", expand=True, fill="x", padx=(0, 6))
 
-        btn_home = self._flat_button(btn_zone, "로봇 원상복구 (Go Home)", "#2ecc71", "#2ecc71", fg="#14171c") 
-        btn_home.configure(command=self.reset_all_joints) 
-        btn_home.pack(side="left", expand=True, fill="x") 
+        btn_home = self._flat_button(btn_zone, "로봇 원상복구 (Go Home)", self.COLOR_GREEN, "#248A3D", fg="white")
+        btn_home.configure(command=self.reset_all_joints)
+        btn_home.pack(side="left", expand=True, fill="x")
 
     def _sync_slider_to_entry(self, value, entry_widget):
         if entry_widget.winfo_exists(): 
@@ -853,9 +857,10 @@ class VLASorterDashboard:
                 "현장 안전을 직접 확인한 뒤 아래 버튼을 누르면, 그때 로봇에 재개(RESUME)\n"
                 "신호가 전달되어 다음 사이클(비전 재탐지)이 다시 시작됩니다."
             ),
-            font=self.FONT_BODY_BOLD, fg="#ffccd2", bg=self.COLOR_EMERGENCY_BG, justify="center"
+            font=self.FONT_BODY_BOLD, fg="#ffccd2", bg=self.COLOR_EMERGENCY_BG, justify="center", wraplength=800
         )
         sub_lbl.place(relx=0.5, rely=0.55, anchor="center")
+        overlay.bind("<Configure>", lambda e: sub_lbl.config(wraplength=max(e.width - 80, 240)))
 
         btn_resume = tk.Button(
             overlay, text="현장 확인 완료 - 재개(RESUME)", font=self.FONT_BODY_BOLD, bg=self.COLOR_RED, fg="white",
@@ -956,12 +961,15 @@ class VLASorterDashboard:
                 self.hitl_cam_label = None
             hitl_win.destroy() 
 
-        hitl_win.protocol("WM_DELETE_WINDOW", _on_popup_closed) 
-        self.center_popup(hitl_win, width=750, height=420) 
-        hitl_win.grab_set() 
+        hitl_win.protocol("WM_DELETE_WINDOW", _on_popup_closed)
+        self.center_popup(hitl_win, width=750, height=420)
+        # 팝업을 작게 줄여도 안내문/버튼이 겹치지 않도록 최소 크기 강제
+        hitl_win.minsize(650, 420)
+        hitl_win.grab_set()
 
-        lbl_alert = tk.Label(hitl_win, text="[WARNING] AI 판단 신뢰도 저하 상황 발생 - 작업자 수동 지시 대기", font=self.FONT_BODY_BOLD, fg=self.COLOR_ORANGE, bg=self.COLOR_BG, pady=10) 
-        lbl_alert.pack(fill="x", side="top") 
+        lbl_alert = tk.Label(hitl_win, text="[WARNING] AI 판단 신뢰도 저하 상황 발생 - 작업자 수동 지시 대기", font=self.FONT_BODY_BOLD, fg=self.COLOR_ORANGE, bg=self.COLOR_BG, pady=10, wraplength=700, justify="center")
+        lbl_alert.pack(fill="x", side="top")
+        hitl_win.bind("<Configure>", lambda e: lbl_alert.config(wraplength=max(e.width - 40, 200)))
 
         main_split = tk.Frame(hitl_win, bg=self.COLOR_BG)
         main_split.pack(fill="both", expand=True, padx=15, pady=10)
@@ -969,25 +977,25 @@ class VLASorterDashboard:
         left_panel = tk.Frame(main_split, bg=self.COLOR_BG)
         left_panel.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
-        info_card = self._card_frame(left_panel, bg=self.COLOR_CARD_DARK) 
-        info_card.pack(fill="x", pady=(0, 10)) 
-        
-        img_dummy = tk.Label( 
-            info_card, 
-            text=( 
-                f"[ 판정 예외 농산물 데이터 ]\n\n" 
-                f"• 품목 종류: {fruit_type}\n" 
-                f"• 현재 상태: {condition}\n" 
+        info_card = self._card_frame(left_panel, bg=self.COLOR_CARD_DARK)
+        info_card.pack(fill="x", pady=(0, 10))
+
+        img_dummy = tk.Label(
+            info_card,
+            text=(
+                f"[ 판정 예외 농산물 데이터 ]\n\n"
+                f"• 품목 종류: {fruit_type}\n"
+                f"• 현재 상태: {condition}\n"
                 f"• 신뢰도 점수: {confidence * 100:.1f}%"
-            ), 
+            ),
             font=self.FONT_MONO, bg=self.COLOR_CARD_DARK, fg=self.COLOR_TEXT_MUTED, justify="left", anchor="w", padx=10, pady=15
-        ) 
-        img_dummy.pack(fill="x") 
+        )
+        img_dummy.pack(fill="x")
 
-        lbl_question = tk.Label(left_panel, text="해당 농산물을 어떤 범주로 매핑할까요?", font=self.FONT_BODY_BOLD, fg=self.COLOR_TEXT, bg=self.COLOR_BG) 
-        lbl_question.pack(anchor="w", pady=5) 
+        lbl_question = tk.Label(left_panel, text="해당 농산물을 어떤 범주로 매핑할까요?", font=self.FONT_BODY_BOLD, fg=self.COLOR_TEXT, bg=self.COLOR_BG)
+        lbl_question.pack(anchor="w", pady=5)
 
-        right_panel = tk.LabelFrame(main_split, text="주 카메라 데이터 실시간 크롭 뷰", font=self.FONT_BODY_BOLD, fg="white", bg=self.COLOR_CARD, bd=2)
+        right_panel = tk.LabelFrame(main_split, text="주 카메라 데이터 실시간 크롭 뷰", font=self.FONT_BODY_BOLD, fg=self.COLOR_TEXT, bg=self.COLOR_CARD, bd=2)
         right_panel.pack(side="right", fill="both", expand=True)
 
         self.hitl_cam_label = tk.Label(right_panel, bg="#000000", text="영상 동기화 대기 중...")
@@ -999,6 +1007,30 @@ class VLASorterDashboard:
         def manual_sort(category):
             destination = CATEGORY_TO_DESTINATION[category]
             raw_answer = _category_to_raw_answer(category)
+
+            # session_id가 없다는 건 사이드바 "작업자 지시 대기 (테스트)" 버튼으로 연 로컬
+            # 테스트 팝업이라는 뜻 (실제 VLA_ASK_HUMAN 이벤트는 항상 session_id를 담아서 옴).
+            # 백엔드에 대응하는 세션이 없어 POST /api/feedback이 항상 409로 실패하므로,
+            # 서버 왕복 없이 즉시 로컬에서 매핑 완료 처리를 해준다.
+            if self.hitl_session_id is None:
+                self.counts[category] = self.counts.get(category, 0) + 1
+                if category in self.count_labels:
+                    self.count_labels[category].config(text=f"{self.counts[category]} 개")
+                self.log_message(f"[HITL Test] '{category}' 선택 -> destination={destination} (테스트 모드, 로컬 처리)")
+                messagebox.showinfo(
+                    "매핑 완료",
+                    f"'{self.hitl_fruit_type}'을(를) [{category}]로 매핑 완료했습니다. (테스트 모드)",
+                )
+                if self.hitl_popup is not None:
+                    try:
+                        if self.hitl_popup.winfo_exists():
+                            self.hitl_popup.destroy()
+                    except tk.TclError:
+                        pass
+                    self.hitl_popup = None
+                    self.hitl_cam_label = None
+                return
+
             self.log_message(f"[HITL] '{category}' 선택 -> raw_answer='{raw_answer}' 전송 중... (destination={destination})")
 
             def worker():
@@ -1034,7 +1066,7 @@ class VLASorterDashboard:
         colors = {"판매": self.COLOR_GREEN, "못난이": self.COLOR_ORANGE, "가공용": self.COLOR_BLUE, "폐기": self.COLOR_RED} 
         for cat, color in colors.items(): 
             btn = tk.Button( 
-                btn_box, text=cat, bg=color, fg="#14171c", activebackground=color, bd=0, relief="flat", 
+                btn_box, text=cat, bg=color, fg="white", activebackground=color, bd=0, relief="flat",
                 font=self.FONT_BODY_BOLD, width=7, pady=10, cursor="hand2", command=lambda c=cat: manual_sort(c), 
             ) 
             btn.pack(side="left", padx=3, expand=True, fill="x") 
