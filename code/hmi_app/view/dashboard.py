@@ -39,14 +39,14 @@ DESTINATION_TO_CATEGORY = {v: k for k, v in CATEGORY_TO_DESTINATION.items()}
 class VLASorterDashboard:
     # ── iOS 시스템 컬러 기반 라이트 테마 ──────────────────────────
     COLOR_BG = "#F2F2F7"          # iOS systemGroupedBackground
-    COLOR_SIDEBAR = "#FFFFFF"
-    COLOR_CARD = "#FFFFFF"
+    COLOR_SIDEBAR = "#F9F9FB"     # 순백 대신 눈부심 줄인 오프화이트
+    COLOR_CARD = "#F9F9FB"
     COLOR_CARD_DARK = "#E9E9EB"   # 로그창/입력창 등 인셋 박스 (iOS systemGray5)
     COLOR_ROW = "#F2F2F7"
     COLOR_BORDER = "#D1D1D6"      # iOS separator
     COLOR_TEXT = "#1C1C1E"        # iOS label
     COLOR_TEXT_MUTED = "#6E6E73"  # iOS secondaryLabel
-    COLOR_TEXT_DIM = "#AEAEB2"    # iOS tertiaryLabel
+    COLOR_TEXT_DIM = "#2C2C2E"    # 잘 안 보여서 어둡게 조정 (원래 iOS tertiaryLabel은 #AEAEB2였음)
     COLOR_BLUE = "#007AFF"        # iOS systemBlue
     COLOR_BLUE_DEEP = "#0060DF"
     COLOR_GREEN = "#34C759"       # iOS systemGreen
