@@ -47,6 +47,15 @@ TIMEOUT_SEC = _TRAVEL_TIME + 2.5
 STALL_TIME_SEC = 2.0        # z가 이 시간(초) 이상 거의 안 움직이면 접촉으로 간주
 STALL_Z_EPSILON_MM = 0.5    # 이 이하의 z 변화는 "안 움직임"으로 취급 (컨트롤러/센서 노이즈 감안)
 
+# release_force()/release_compliance_ctrl()도 amovel()처럼 ret(0=성공/-1=실패)을
+# 반환하는데 지금까지 이 값을 버렸음 - E-STOP 직후처럼 컨트롤러가 막 정지 명령을
+# 받은 시점에 이 해제 호출이 실패하면, task_compliance_ctrl(stx=[...,500,...])로
+# 걸어둔 Z축 컴플라이언스(강성 500, 다른 축의 1/6)가 안 풀린 채로 남을 수 있음 -
+# 그 상태에서 나가는 movel(Z 방향 이동)은 물렁한 Z축에 흡수되어 명령상 성공
+# (ret=0)으로 와도 실제로는 거의 안 움직이는 문제로 이어질 수 있어서(E-STOP 복구의
+# lift 단계가 반복 재현한 증상과 일치) 재시도함.
+RELEASE_RETRY_COUNT = 3
+
 
 def force_controlled_place(
     node, current_pos, force_threshold=FORCE_THRESHOLD,
@@ -221,9 +230,24 @@ def force_controlled_place(
         except Exception as e:
             node.get_logger().warn(f'현재 위치 취소용 get_current_posx/amovel 실패 (무시하고 release 진행): {e}')
 
-        # 5) 안전을 위해 컴플라이언스 및 힘 제어 모드 해제
-        release_force(0.2)
-        release_compliance_ctrl()
+        # 5) 안전을 위해 컴플라이언스 및 힘 제어 모드 해제 - 실패하면 재시도
+        # (RELEASE_RETRY_COUNT 위 설명 참고).
+        for attempt in range(1, RELEASE_RETRY_COUNT + 1):
+            force_ret = release_force(0.2)
+            compliance_ret = release_compliance_ctrl()
+            if force_ret == 0 and compliance_ret == 0:
+                break
+            node.get_logger().error(
+                f'컴플라이언스/힘 제어 해제 실패(시도 {attempt}/{RELEASE_RETRY_COUNT}): '
+                f'release_force={force_ret}, release_compliance_ctrl={compliance_ret} - 재시도합니다.'
+            )
+            time.sleep(0.1)
+        else:
+            node.get_logger().error(
+                '컴플라이언스/힘 제어 해제가 끝내 실패했습니다 - 로봇이 여전히 Z축 '
+                '컴플라이언스 상태로 남아있을 수 있습니다. 이후 이동이 명령상 성공해도 '
+                '실제로는 거의 안 움직이면 이게 원인일 가능성이 높습니다.'
+            )
         time.sleep(0.1)
 
     # 6) 접촉 결과 반환

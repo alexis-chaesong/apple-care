@@ -111,6 +111,7 @@ def main(args=None):
         movel, movej, posx, posj, wait,
         set_velx, set_accx, set_velj, set_accj, get_current_posx,
         amovel, amovej, check_motion, DR_BASE,
+        DR_MV_MOD_ABS, DR_MV_MOD_REL,
     )
     from apple_care_robot.force_place import (
         force_controlled_place,
@@ -142,6 +143,21 @@ def main(args=None):
 
     emergency_stop = threading.Event()
     estop_tracker = EstopRecoveryTracker()
+
+    # E-STOP 물리 복구(상승/홈/카메라) 후, 운영자가 프론트엔드에서 재개 버튼을 눌러
+    # /robot/command로 RESUME을 보내야만 다음 사이클(비전 재탐지)을 진행하도록 하기
+    # 위한 게이트. 이전에는 물리 복구가 끝나면 무조건 자동으로 READY까지 갔는데,
+    # 안전정지 상황에서는 운영자가 현장을 확인한 뒤 명시적으로 재개시켜야 한다는
+    # 요구사항으로 추가함 (estop_handler.check_and_recover의 wait_for_resume 참고).
+    resume_requested = threading.Event()
+
+    def wait_for_resume_signal() -> None:
+        # 대기 시작 직전에 clear해서, 이번 E-STOP 이전에 눌렸을 수 있는 낡은
+        # RESUME 신호 때문에 이번 게이트가 곧바로(운영자 확인 없이) 통과되는 걸
+        # 막음 - 여기서 clear한 뒤에 오는 set()만 이 wait()를 깨움.
+        resume_requested.clear()
+        resume_requested.wait()
+        resume_requested.clear()
 
     # 이동/힘제어 폴링 루프 안에서 공용으로 쓸 하드웨어 안전정지 조회 콜백.
     # comm_node를 넘기는 이유: stop_motion()과 동일하게 DSR 제어용 메인 node를
@@ -197,15 +213,25 @@ def main(args=None):
         # 그대로 쓰면 복구 이동 자체가 시작하자마자 다시 예외를 던져 복구가 영원히
         # 끝나지 않음. 그래서 emergency_stop을 재확인하지 않는 순수 이동
         # (amovel/amovej + check_motion 폴링)만 씀.
-        def _recovery_movel(pos):
-            ret = amovel(pos, ref=DR_BASE)
+        def _recovery_movel(pos, mod=DR_MV_MOD_ABS):
+            # ref=DR_BASE(절대좌표계 기준) + mod=REL(상대이동)이므로 z축 부호는
+            # 뒤집을 필요 없음 - "양수 lift_mm=상승"이 그대로 맞음. (한때 REL을
+            # 툴좌표 기준으로 착각해서 -Z로 보내야 한다고 판단했었는데, 그건 오해였음:
+            # 여기서는 DR_BASE 기준이라 +Z가 곧 위쪽임.)
+            if mod == DR_MV_MOD_REL:
+                # DSR_ROBOT2.get_normal_pos()는 posx/posj/ndarray 또는 list만
+                # 받아들이고 일반 tuple은 "Invalid type : pos"로 거부함 - 그래서
+                # 여기서도 반드시 posx로 다시 감싸야 함(실측으로 확인된 문제).
+                x, y, z, rx, ry, rz = pos
+                pos = posx(x, y, z, rx, ry, rz)
+            ret = amovel(pos, ref=DR_BASE, mod=mod)
             # amovel()은 컨트롤러가 명령을 실제로 접수했는지(0=성공, 그 외=거부)를
             # 반환하는데 지금까지는 이 값을 그냥 버렸음 - lift 단계가 폴링상으로는
             # "정지 확인 완료"인데 실제 z는 전혀 안 바뀌는 사례가 실측으로 반복
             # 확인됐고(재시도해도 동일), 이게 check_motion() 타이밍 레이스가 아니라
             # 컨트롤러가 애초에 명령을 거부한 것인지 다음 발생 시 바로 알 수 있도록 남김.
             if ret != 0:
-                node.get_logger().error(f"[E-STOP] amovel 명령이 거부됐습니다(ret={ret}): pos={pos}")
+                node.get_logger().error(f"[E-STOP] amovel 명령이 거부됐습니다(ret={ret}): pos={pos}, mod={mod}")
             return ret
 
         def _recovery_movej(pos):
@@ -229,6 +255,7 @@ def main(args=None):
             # 동일한 방식 - move_resume 없이도 정지 직후 movel/movej가 정상 동작함이
             # 그 프로젝트에서 실기로 검증돼 있음).
             describe_robot_state=describe_robot_state,
+            wait_for_resume=wait_for_resume_signal,
         )
 
     # ------------------------------------------------------------------
@@ -259,8 +286,15 @@ def main(args=None):
         elif command == "EMERGENCY_STOP":
             node.get_logger().error(f"[{TOPIC_ROBOT_COMMAND}] EMERGENCY_STOP 수신")
             emergency_stop.set()
+        elif command == "RESUME":
+            # E-STOP 물리 복구가 끝난 뒤 wait_for_resume_signal()에서 대기 중일 때만
+            # 의미가 있음 - 그 외 상황에서 와도 이벤트만 걸어두는데, wait_for_resume_signal()이
+            # 대기 시작 직전에 항상 clear부터 하므로 낡은(이전 건에 대한) RESUME이
+            # 다음 E-STOP 게이트를 곧바로 통과시키는 일은 없음.
+            node.get_logger().info(f"[{TOPIC_ROBOT_COMMAND}] RESUME 수신")
+            resume_requested.set()
         else:
-            # HOLD/RESUME/MANUAL_PAUSE 등 사이클 도중 정지/재개는 이번 연동 범위 밖.
+            # HOLD/MANUAL_PAUSE 등 사이클 도중 정지/재개는 이번 연동 범위 밖.
             node.get_logger().warn(f"[{TOPIC_ROBOT_COMMAND}] '{command}' 명령은 아직 처리하지 않습니다.")
 
     comm_node.create_subscription(String, TOPIC_DECISION_RESULT, decision_result_callback, 10)
@@ -449,13 +483,21 @@ def main(args=None):
 
     # HOME은 사이클 전체에서 맨 처음(여기)과 맨 마지막(루프를 빠져나간 뒤)에만 거침.
     # 그 사이에는 CAMERA <-> WAY <-> BOX 사이만 순환함.
-    node.get_logger().info("Move to HOME (최초 1회)")
-    do_safe_movej(HOME)
-    wait(0.3)
+    #
+    # 이 최초 HOME->CAMERA 구간은 메인 while 루프 진입 전이라 루프 안쪽의
+    # try/except EmergencyStopError(아래 참고)로는 보호되지 않음 - 실측으로 확인된
+    # 문제: 이 구간에서 EMERGENCY_STOP이 오면 EmergencyStopError가 그대로 전파돼
+    # 복구 없이 프로세스 자체가 죽어버림. 그래서 여기도 동일하게 감싸야 함.
+    try:
+        node.get_logger().info("Move to HOME (최초 1회)")
+        do_safe_movej(HOME)
+        wait(0.3)
 
-    node.get_logger().info("Move to CAMERA position")
-    do_safe_movel(CAMERA)
-    wait(0.3)
+        node.get_logger().info("Move to CAMERA position")
+        do_safe_movel(CAMERA)
+        wait(0.3)
+    except EmergencyStopError:
+        recover_from_estop_if_needed()
 
     # CAMERA 위치에 도착 + 그리퍼가 비어있는 이 시점부터가 백엔드 입장에서
     # "지금 보이는 게 진짜 새 사과"라고 신뢰할 수 있는 유일한 구간임.
@@ -598,8 +640,14 @@ def main(args=None):
     node.get_logger().info("=== Box sequence test done ===")
 
     node.get_logger().info("Move to HOME (종료)")
-    do_safe_movej(HOME)
-    wait(0.3)
+    try:
+        do_safe_movej(HOME)
+        wait(0.3)
+    except EmergencyStopError:
+        # 종료 구간이라 recover_from_estop_if_needed()가 굳이 CAMERA까지 다시
+        # 보낼 필요는 없지만, 그래도 정지 명령 자체는 이미 나갔으므로(safe_motion.py)
+        # 로봇이 안전하게 멈춘 상태 - 프로세스가 죽지 않도록 잡아만 둠.
+        node.get_logger().error("종료 HOME 이동 중 EMERGENCY_STOP 감지 - 그대로 종료합니다.")
 
     comm_executor.shutdown()
     comm_node.destroy_node()

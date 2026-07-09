@@ -67,7 +67,7 @@ class EstopRecoveryTracker:
         return RecoveryPlan(action="RESUME_AT_CAMERA", target_pos=None)
 
 
-RECOVERY_LIFT_MM = 200  # 비상정지 직후 벽/테이블 회피용 최소 상승량(mm)
+RECOVERY_LIFT_MM = 100  # 비상정지 직후 벽/테이블 회피용 최소 상승량(mm)
 RECOVERY_SETTLE_SEC = 1.0  # 완전히 멈춘 다음에도 추가로 더 대기하는 여유 시간(초)
 RECOVERY_POLL_SEC = 0.05  # check_motion()으로 정지 여부를 확인하는 폴링 간격(초)
 
@@ -89,6 +89,11 @@ REQUIRED_IDLE_CONFIRMATIONS = 3
 # LIFT_MIN_ACHIEVED_FRAC 미만이면 상승이 안 된 것으로 보고 재시도함.
 LIFT_RETRY_COUNT = 3
 LIFT_MIN_ACHIEVED_FRAC = 0.5
+
+# movel(pos, mod=...)의 mod 값 - DSR_ROBOT2.DR_MV_MOD_ABS/REL과 숫자가 같지만, 이
+# 모듈은 하드웨어 의존을 피하려고 DSR_ROBOT2를 import하지 않으므로 값만 그대로 복제함.
+MOVE_MOD_ABS = 0
+MOVE_MOD_REL = 1
 
 
 def _wait_until_fully_stopped(check_motion, wait, settle_sec, node=None, label=""):
@@ -130,7 +135,7 @@ def execute_recovery(
     node,
     plan: RecoveryPlan,
     *,
-    movel: Callable[[Any], None],
+    movel: Callable[..., None],
     movej: Callable[[Any], None],
     wait: Callable[[float], None],
     check_motion: Callable[[], Any],
@@ -210,22 +215,24 @@ def execute_recovery(
     movel(flush_pos)
     _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="flush")
 
-    # 실측(E-STOP 로그)으로 확인된 문제: flush movel 직후 곧바로 movel(lift)을
-    # 내리면, check_motion()이 컨트롤러 내부 상태가 "이동 중"으로 갱신되기 전에
-    # REQUIRED_IDLE_CONFIRMATIONS(3연속 idle)를 만족해버려서(폴링 0회) 실제로는
-    # 로봇이 전혀 안 움직였는데도 "정지 확인 완료"로 오판하는 경우가 있었음
-    # (목표 z 대비 실제 상승량이 거의 0mm). 이 상태로 HOME/원위치/CAMERA로
-    # 넘어가면 여전히 상승 전 높이라 벽/박스와 충돌 위험이 그대로 남음. 그래서
-    # 매 시도 뒤 실제 z 변화량을 재서 검증하고, 목표치의 LIFT_MIN_ACHIEVED_FRAC
-    # 미만이면 상승이 실행되지 않은 것으로 보고 재시도함.
+    # 실측(E-STOP 로그)으로 확인된 문제: 절대좌표(ABS) 목표로 lift를 계산해서
+    # movel을 내리면, 서비스 응답은 성공(ret=0)으로 오고 컨트롤러 상태도 정상
+    # (STANDBY)으로 보고되는데도 로봇이 전혀 안 움직이는 경우가 반복 재현됐음 -
+    # stop_mode(HOLD/QSTOP)를 바꿔봐도 동일해서 정지 방식 문제가 아니라, 그 자세에서
+    # orientation을 고정한 채 그 절대 목표가 IK/작업공간상 도달 불가능해서 조용히
+    # 무시된 것으로 보임. 그래서 절대좌표 대신 상대이동(REL)으로 바꿈 - 상대이동은
+    # 현재 관절해에서 연속적으로 풀리는 경우가 많아 이 문제를 우회할 수 있음.
+    # movel(pos, mod)는 하드웨어 의존이 없는 이 모듈 기준으로 "양수 lift_mm=상승"
+    # 의미만 유지함 - 실제 DSR에 보낼 때 z축 부호를 뒤집어야 하는지는 하드웨어
+    # 어댑터(box_sequence_test.py의 _recovery_movel)가 처리할 책임임.
+    rel_lift_pos = posx_factory(0, 0, lift_mm, 0, 0, 0)
     for attempt in range(1, LIFT_RETRY_COUNT + 1):
-        cx, cy, cz, crx, cry, crz = get_current_pos()
-        lifted_pos = posx_factory(cx, cy, cz + lift_mm, crx, cry, crz)
+        cz = get_current_pos()[2]
         node.get_logger().info(
-            f"[E-STOP] 충돌 회피를 위해 {lift_mm}mm 상승합니다. "
-            f"(목표 z={cz + lift_mm:.1f}, 현재 z={cz:.1f}, 시도 {attempt}/{LIFT_RETRY_COUNT})"
+            f"[E-STOP] 충돌 회피를 위해 {lift_mm}mm 상승합니다(상대이동). "
+            f"(현재 z={cz:.1f}, 시도 {attempt}/{LIFT_RETRY_COUNT})"
         )
-        movel(lifted_pos)
+        movel(rel_lift_pos, mod=MOVE_MOD_REL)
         _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="lift")
 
         actual_z_after_lift = get_current_pos()[2]
@@ -268,7 +275,7 @@ def check_and_recover(
     tracker: EstopRecoveryTracker,
     emergency_stop_event,
     *,
-    movel: Callable[[Any], None],
+    movel: Callable[..., None],
     movej: Callable[[Any], None],
     wait: Callable[[float], None],
     check_motion: Callable[[], Any],
@@ -280,6 +287,7 @@ def check_and_recover(
     check_hw_safety_stop: Optional[Callable[[], "tuple"]] = None,
     resume_motion: Optional[Callable[[], Any]] = None,
     describe_robot_state: Optional[Callable[[], str]] = None,
+    wait_for_resume: Optional[Callable[[], None]] = None,
 ) -> bool:
     """
     emergency_stop_event(threading.Event)가 걸려 있으면 복구를 수행하고 True를 반환.
@@ -302,9 +310,18 @@ def check_and_recover(
     describe_robot_state: execute_recovery()로 그대로 전달됨 - execute_recovery의
         describe_robot_state 설명 참고.
 
+    wait_for_resume: 넘겨주면(예: threading.Event.wait을 바인딩한 callable, 인자
+        없이 블록킹 호출), 물리 복구(상승->홈->[원위치]->카메라)가 다 끝난 뒤에도
+        바로 READY로 전환해 다음 사이클(재탐지)을 재개하지 않고, 이 함수가 리턴할
+        때까지 기다림 - 프론트엔드의 "재개" 버튼이 눌려야만(백엔드의 RESUME
+        명령이 도착해야만) 계속 진행되게 하기 위함. 이전에는 무조건 자동으로
+        READY까지 갔는데, 실제 안전정지 상황에서는 운영자가 현장을 확인하고
+        명시적으로 재개시켜야 한다는 요구사항 때문에 추가함. None이면(기본값)
+        기다리지 않고 기존처럼 즉시 READY로 전환함 - 하위 호환용.
+
     복구 후에는 emergency_stop_event를 clear()해서 다음 루프에서 다시 걸리지 않게
-    하고, "무조건 CAMERA로 보내서 재개" 정책에 따라 별도의 재가 명령 없이
-    바로 다음 decision을 받을 수 있는 상태로 돌린다.
+    하고, (wait_for_resume이 없으면) "무조건 CAMERA로 보내서 재개" 정책에 따라
+    별도의 재가 명령 없이 바로 다음 decision을 받을 수 있는 상태로 돌린다.
     """
     if not emergency_stop_event.is_set():
         return False
@@ -355,5 +372,16 @@ def check_and_recover(
     # 새 작업을 영영 안 보내는 상태로 멈춰버림 - 그래서 반드시 둘 다 갱신함.
     status_bus.publish_gripper_status(False)
     emergency_stop_event.clear()
+
+    if wait_for_resume is not None:
+        # 물리적으로는 이미 안전한 위치(카메라)에 서 있지만, 운영자가 현장을
+        # 확인하고 프론트엔드에서 재개 버튼을 누르기 전까지는 READY로 넘어가지
+        # 않음 - READY가 아니면 백엔드가 새 Vision 판단을 하지 않으므로(main.py의
+        # _vla_consumer_loop 게이팅) 이 상태로 있는 동안은 안전하게 대기만 함.
+        node.get_logger().warn("[E-STOP] 물리 복구 완료 - 재개(RESUME) 신호를 기다립니다.")
+        status_bus.set_state("ERROR", "waiting_for_resume")
+        wait_for_resume()
+        node.get_logger().info("[E-STOP] 재개(RESUME) 신호를 받아 사이클을 계속합니다.")
+
     status_bus.set_state("READY")
     return True

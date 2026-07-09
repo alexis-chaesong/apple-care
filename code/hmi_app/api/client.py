@@ -97,6 +97,13 @@ def post_robot_estop(task_id: Optional[str] = None) -> dict:
     return resp.json()
 
 
+def post_robot_resume() -> dict:
+    """POST /api/robot/resume -> {"result": "SUCCESS", "command": "RESUME"}"""
+    resp = requests.post(f"{BASE_URL}/api/robot/resume", timeout=DEFAULT_TIMEOUT_SEC)
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ------------------------------------------------------------------
 # 그리퍼 / MoveJ 제어용 함수 (TODO: backend 엔드포인트 미구현)
 # ------------------------------------------------------------------

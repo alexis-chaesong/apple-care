@@ -849,37 +849,71 @@ class VLASorterDashboard:
 
         sub_lbl = tk.Label(
             overlay, text=(
-                "로봇은 정지 후 스스로 안전 위치로 내려놓고 자동으로 카메라 위치에서 작업을 재개합니다.\n"
-                "이 화면은 알림용이며, 아래 버튼은 로봇 동작과 무관하게 이 화면만 닫습니다.\n"
-                "실제로 로봇이 재개됐는지는 상단 SYSTEM STATUS와 시스템 로그에서 확인하세요."
+                "로봇은 정지 후 스스로 안전 위치(카메라 위치)로 물러나 대기합니다.\n"
+                "현장 안전을 직접 확인한 뒤 아래 버튼을 누르면, 그때 로봇에 재개(RESUME)\n"
+                "신호가 전달되어 다음 사이클(비전 재탐지)이 다시 시작됩니다."
             ),
             font=self.FONT_BODY_BOLD, fg="#ffccd2", bg=self.COLOR_EMERGENCY_BG, justify="center"
         )
         sub_lbl.place(relx=0.5, rely=0.55, anchor="center")
 
-        btn_reset = tk.Button(
-            overlay, text="확인했습니다 - 화면 닫기 (로봇 동작에는 영향 없음)", font=self.FONT_BODY_BOLD, bg=self.COLOR_RED, fg="white",
-            activebackground="white", activeforeground=self.COLOR_EMERGENCY_BG, bd=0, relief="flat", padx=25, pady=12, cursor="hand2", command=self._clear_emergency_overlay,
+        btn_resume = tk.Button(
+            overlay, text="현장 확인 완료 - 재개(RESUME)", font=self.FONT_BODY_BOLD, bg=self.COLOR_RED, fg="white",
+            activebackground="white", activeforeground=self.COLOR_EMERGENCY_BG, bd=0, relief="flat", padx=25, pady=12, cursor="hand2", command=self._confirm_and_resume,
         )
-        btn_reset.place(relx=0.5, rely=0.68, anchor="center") 
+        btn_resume.place(relx=0.5, rely=0.68, anchor="center")
+        self.btn_emergency_resume = btn_resume
 
-        overlay.lift() 
+        overlay.lift()
+
+    def _confirm_and_resume(self):
+        # 재개 신호가 실제로 로봇에 전달됐는지 확인하기 전까지는 오버레이를
+        # 닫지 않음(요구사항: 버튼이 로봇 동작과 무관하게 화면만 닫던 이전 동작을
+        # 실제 재개 트리거로 바꿈). 이중 클릭/중복 요청 방지를 위해 전송 중엔
+        # 버튼을 비활성화함.
+        btn = getattr(self, "btn_emergency_resume", None)
+        if btn is not None and btn.winfo_exists():
+            btn.config(state="disabled", text="재개 신호 전송 중...")
+
+        def worker():
+            try:
+                result = client.post_robot_resume()
+
+                def on_success():
+                    self.log_message(f"[Robot] RESUME 명령 전송 성공: {result}")
+                    self._clear_emergency_overlay()
+
+                self.root.after(0, on_success)
+
+            except requests.exceptions.RequestException as exc:
+                error_text = str(exc)
+
+                def on_error():
+                    self.log_message(f"[Robot] RESUME 명령 전송 실패: {error_text}")
+                    messagebox.showerror("서버 연결 실패", "서버와 연결되지 않아 재개 신호를 보내지 못했습니다. 다시 시도해주세요.")
+                    if btn is not None and btn.winfo_exists():
+                        btn.config(state="normal", text="현장 확인 완료 - 재개(RESUME)")
+
+                self.root.after(0, on_error)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _clear_emergency_overlay(self):
         self.is_estopped = False
-        
-        if getattr(self, "emergency_overlay", None) is not None and self.emergency_overlay.winfo_exists(): 
-            self.emergency_overlay.destroy() 
-        self.emergency_overlay = None 
-        
+
+        if getattr(self, "emergency_overlay", None) is not None and self.emergency_overlay.winfo_exists():
+            self.emergency_overlay.destroy()
+        self.emergency_overlay = None
+        self.btn_emergency_resume = None
+
         self.top_bar.config(bg=self.COLOR_SIDEBAR)
         self.title_label.config(bg=self.COLOR_SIDEBAR, fg=self.COLOR_BLUE)
         self.current_tab_lbl.config(bg=self.COLOR_SIDEBAR, fg=self.COLOR_TEXT_MUTED)
-        self.status_label.config(text="SYSTEM STATUS: RUNNING", fg=self.COLOR_GREEN, bg=self.COLOR_SIDEBAR) 
-        
+        self.status_label.config(text="SYSTEM STATUS: RUNNING", fg=self.COLOR_GREEN, bg=self.COLOR_SIDEBAR)
+
         self.btn_hitl_wait.config(state="normal")
         self.show_frame("monitor")
-        self.log_message("[RECOVERY] 긴급 정지 복구 완료. 시스템 정상 모니터링 상태로 복귀되었습니다.") 
+        self.log_message("[RECOVERY] 재개(RESUME) 신호 전송 완료. 시스템 정상 모니터링 상태로 복귀되었습니다.")
 
     def trigger_hitl_popup(self, payload=None):
         if self.is_estopped:

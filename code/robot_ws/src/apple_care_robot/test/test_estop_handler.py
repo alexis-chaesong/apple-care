@@ -77,6 +77,9 @@ class _FakeLogger:
     def info(self, msg):
         self.messages.append(("info", msg))
 
+    def warn(self, msg):
+        self.messages.append(("warn", msg))
+
     def error(self, msg):
         self.messages.append(("error", msg))
 
@@ -101,17 +104,28 @@ def _fake_get_current_pos():
     return _CURRENT_POS
 
 
+MOVE_MOD_ABS = 0
+MOVE_MOD_REL = 1
+
+
 def _make_stateful_pos(initial=_CURRENT_POS):
-    """movel(pos)이 실제로 그 좌표로 이동한 것처럼 반영하는 가짜 위치 상태.
+    """movel(pos, mod)이 실제로 그 좌표로 이동한 것처럼 반영하는 가짜 위치 상태.
     execute_recovery의 lift 검증(실제 z 변화 확인 후 재시도)이 통과하려면
-    get_current_pos()가 movel 호출을 반영해야 하므로 필요함."""
+    get_current_pos()가 movel 호출을 반영해야 하므로 필요함. mod=REL이면(lift가
+    쓰는 상대이동) pos를 델타로 보고 현재 위치에 더함 - estop_handler.py 기준
+    "양수 lift_mm=상승" 의미를 그대로 따름(실제 하드웨어의 z축 부호 반전은
+    box_sequence_test.py의 어댑터에서만 처리하는 별개 관심사)."""
     state = {"pos": list(initial)}
 
     def get_current_pos():
         return tuple(state["pos"])
 
-    def apply_movel(pos):
-        if isinstance(pos, tuple) and len(pos) == 6:
+    def apply_movel(pos, mod=MOVE_MOD_ABS):
+        if not (isinstance(pos, tuple) and len(pos) == 6):
+            return
+        if mod == MOVE_MOD_REL:
+            state["pos"] = [c + d for c, d in zip(state["pos"], pos)]
+        else:
             state["pos"] = list(pos)
 
     return get_current_pos, apply_movel
@@ -125,9 +139,9 @@ def test_execute_recovery_flushes_pending_target_before_lifting():
     calls = []
     get_current_pos, apply_movel = _make_stateful_pos()
 
-    def movel(pos):
+    def movel(pos, mod=MOVE_MOD_ABS):
         calls.append(("movel", pos))
-        apply_movel(pos)
+        apply_movel(pos, mod)
 
     tracker = EstopRecoveryTracker()  # 정상 상태 (RESUME_AT_CAMERA)
     plan = tracker.get_recovery_plan()
@@ -159,9 +173,9 @@ def test_execute_recovery_calls_resume_motion_before_any_movel_when_provided():
     calls = []
     get_current_pos, apply_movel = _make_stateful_pos()
 
-    def movel(pos):
+    def movel(pos, mod=MOVE_MOD_ABS):
         calls.append(("movel", pos))
-        apply_movel(pos)
+        apply_movel(pos, mod)
 
     tracker = EstopRecoveryTracker()
     plan = tracker.get_recovery_plan()
@@ -192,9 +206,9 @@ def test_execute_recovery_lifts_up_from_current_position_after_flush():
     calls = []
     get_current_pos, apply_movel = _make_stateful_pos()
 
-    def movel(pos):
+    def movel(pos, mod=MOVE_MOD_ABS):
         calls.append(("movel", pos))
-        apply_movel(pos)
+        apply_movel(pos, mod)
 
     tracker = EstopRecoveryTracker()  # 정상 상태 (RESUME_AT_CAMERA)
     plan = tracker.get_recovery_plan()
@@ -213,10 +227,10 @@ def test_execute_recovery_lifts_up_from_current_position_after_flush():
         posx_factory=_fake_posx_factory,
     )
 
-    lifted_pos = (100.0, 200.0, 50.0 + RECOVERY_LIFT_MM, 10.0, 20.0, 30.0)  # z만 +RECOVERY_LIFT_MM
+    lift_delta = (0, 0, RECOVERY_LIFT_MM, 0, 0, 0)  # z만 +RECOVERY_LIFT_MM
     # calls[0]=flush movel, calls[1:5]=flush 구간의 _wait_until_fully_stopped가
     # 남기는 4번의 wait(_IDLE_WAITS) 다음이 상승 이동임.
-    assert calls[len(_IDLE_WAITS) + 1] == ("movel", lifted_pos)
+    assert calls[len(_IDLE_WAITS) + 1] == ("movel", lift_delta)
 
 
 def test_execute_recovery_return_to_origin_moves_flush_then_lift_then_home_then_origin_then_camera():
@@ -224,9 +238,9 @@ def test_execute_recovery_return_to_origin_moves_flush_then_lift_then_home_then_
     calls = []
     get_current_pos, apply_movel = _make_stateful_pos()
 
-    def movel(pos):
+    def movel(pos, mod=MOVE_MOD_ABS):
         calls.append(("movel", pos))
-        apply_movel(pos)
+        apply_movel(pos, mod)
 
     tracker = EstopRecoveryTracker()
     tracker.begin_pick_attempt(pick_pos="PICK_POS_1")
@@ -247,11 +261,11 @@ def test_execute_recovery_return_to_origin_moves_flush_then_lift_then_home_then_
     )
 
     flush_pos = _CURRENT_POS
-    lifted_pos = (100.0, 200.0, 50.0 + RECOVERY_LIFT_MM, 10.0, 20.0, 30.0)
+    lift_delta = (0, 0, RECOVERY_LIFT_MM, 0, 0, 0)
     assert calls == [
         ("movel", flush_pos),
         *_IDLE_WAITS,
-        ("movel", lifted_pos),
+        ("movel", lift_delta),
         *_IDLE_WAITS,
         ("movej", "HOME"),
         *_IDLE_WAITS,
@@ -268,9 +282,9 @@ def test_execute_recovery_resume_at_camera_skips_origin_and_gripper():
     calls = []
     get_current_pos, apply_movel = _make_stateful_pos()
 
-    def movel(pos):
+    def movel(pos, mod=MOVE_MOD_ABS):
         calls.append(("movel", pos))
-        apply_movel(pos)
+        apply_movel(pos, mod)
 
     tracker = EstopRecoveryTracker()  # 집지 않은 정상 상태
 
@@ -290,11 +304,11 @@ def test_execute_recovery_resume_at_camera_skips_origin_and_gripper():
     )
 
     flush_pos = _CURRENT_POS
-    lifted_pos = (100.0, 200.0, 50.0 + RECOVERY_LIFT_MM, 10.0, 20.0, 30.0)
+    lift_delta = (0, 0, RECOVERY_LIFT_MM, 0, 0, 0)
     assert calls == [
         ("movel", flush_pos),
         *_IDLE_WAITS,
-        ("movel", lifted_pos),
+        ("movel", lift_delta),
         *_IDLE_WAITS,
         ("movej", "HOME"),
         *_IDLE_WAITS,
@@ -316,16 +330,17 @@ def test_execute_recovery_retries_lift_when_first_attempt_does_not_actually_move
 
     calls = []
     get_current_pos, apply_movel = _make_stateful_pos()
+    lift_delta = (0, 0, RECOVERY_LIFT_MM, 0, 0, 0)
     lift_target_z = _CURRENT_POS[2] + RECOVERY_LIFT_MM
     lift_attempts = {"n": 0}
 
-    def movel(pos):
+    def movel(pos, mod=MOVE_MOD_ABS):
         calls.append(("movel", pos))
-        if isinstance(pos, tuple) and len(pos) == 6 and pos[2] == lift_target_z:
+        if mod == MOVE_MOD_REL and pos == lift_delta:
             lift_attempts["n"] += 1
             if lift_attempts["n"] == 1:
                 return  # 첫 시도는 명령이 씹혀서 실제로는 로봇이 안 움직인 것처럼 흉내
-        apply_movel(pos)
+        apply_movel(pos, mod)
 
     execute_recovery(
         node,
@@ -357,7 +372,7 @@ def test_execute_recovery_raises_when_lift_never_actually_moves():
         execute_recovery(
             node,
             plan,
-            movel=lambda pos: None,  # 계속 씹혀서 로봇이 절대 안 움직임
+            movel=lambda pos, mod=MOVE_MOD_ABS: None,  # 계속 씹혀서 로봇이 절대 안 움직임
             movej=lambda pos: None,
             wait=lambda sec: None,
             check_motion=lambda: False,
@@ -449,9 +464,9 @@ def test_check_and_recover_runs_recovery_and_clears_event_when_triggered():
     calls = []
     get_current_pos, apply_movel = _make_stateful_pos()
 
-    def movel(pos):
+    def movel(pos, mod=MOVE_MOD_ABS):
         calls.append(("movel", pos))
-        apply_movel(pos)
+        apply_movel(pos, mod)
 
     triggered = check_and_recover(
         node, status_bus, tracker, event,
@@ -467,13 +482,13 @@ def test_check_and_recover_runs_recovery_and_clears_event_when_triggered():
     )
 
     flush_pos = _CURRENT_POS
-    lifted_pos = (100.0, 200.0, 50.0 + RECOVERY_LIFT_MM, 10.0, 20.0, 30.0)
+    lift_delta = (0, 0, RECOVERY_LIFT_MM, 0, 0, 0)
     assert triggered is True
     assert event.is_set() is False  # 리셋되어야 다음 루프에서 또 걸림
     assert calls == [
         ("movel", flush_pos),
         *_IDLE_WAITS,
-        ("movel", lifted_pos),
+        ("movel", lift_delta),
         *_IDLE_WAITS,
         ("movej", "HOME"),
         *_IDLE_WAITS,
@@ -492,6 +507,50 @@ def test_check_and_recover_runs_recovery_and_clears_event_when_triggered():
     # 그리퍼도 다시 열렸음을 알려야 함(gripper_grasped가 안 풀리는 문제 방지).
     assert ("READY", None) in status_bus.states
     assert False in status_bus.gripper_statuses
+
+
+def test_check_and_recover_waits_for_resume_signal_before_going_ready():
+    # 요구사항: 물리 복구(상승->홈->카메라)가 끝나도 곧바로 READY로 넘어가서 다음
+    # 사이클(비전 재탐지)을 자동 재개하면 안 되고, 운영자가 프론트엔드에서 재개
+    # 버튼을 눌러야만(wait_for_resume이 리턴해야만) READY로 넘어가야 함.
+    import threading
+
+    node = _FakeNode()
+    status_bus = _FakeStatusBus()
+    tracker = EstopRecoveryTracker()  # 정상 상태 (RESUME_AT_CAMERA)
+    event = threading.Event()
+    event.set()
+    calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos, mod=MOVE_MOD_ABS):
+        calls.append(("movel", pos))
+        apply_movel(pos, mod)
+
+    def wait_for_resume():
+        calls.append(("wait_for_resume",))
+
+    triggered = check_and_recover(
+        node, status_bus, tracker, event,
+        movel=movel,
+        movej=lambda pos: calls.append(("movej", pos)),
+        wait=lambda sec: calls.append(("wait", sec)),
+        check_motion=lambda: False,
+        gripper_open=lambda: True,
+        home_pos="HOME",
+        camera_pos="CAMERA",
+        get_current_pos=get_current_pos,
+        posx_factory=_fake_posx_factory,
+        wait_for_resume=wait_for_resume,
+    )
+
+    assert triggered is True
+    # 물리 이동(마지막 camera movel)이 다 끝난 뒤에 wait_for_resume이 호출되고,
+    # 그다음에야 READY 상태가 찍혀야 함.
+    assert calls[-1] == ("wait_for_resume",)
+    ready_index = status_bus.states.index(("READY", None))
+    waiting_index = status_bus.states.index(("ERROR", "waiting_for_resume"))
+    assert waiting_index < ready_index
 
 
 def test_check_and_recover_blocks_and_keeps_event_set_when_hw_safety_stopped():
@@ -545,9 +604,9 @@ def test_check_and_recover_proceeds_when_hw_safety_stop_check_reports_clear():
     calls = []
     get_current_pos, apply_movel = _make_stateful_pos()
 
-    def movel(pos):
+    def movel(pos, mod=MOVE_MOD_ABS):
         calls.append(("movel", pos))
-        apply_movel(pos)
+        apply_movel(pos, mod)
 
     triggered = check_and_recover(
         node, status_bus, tracker, event,
@@ -579,9 +638,9 @@ def test_check_and_recover_when_not_holding_skips_origin_and_resumes_at_camera()
     calls = []
     get_current_pos, apply_movel = _make_stateful_pos()
 
-    def movel(pos):
+    def movel(pos, mod=MOVE_MOD_ABS):
         calls.append(("movel", pos))
-        apply_movel(pos)
+        apply_movel(pos, mod)
 
     triggered = check_and_recover(
         node, status_bus, tracker, event,
@@ -597,12 +656,12 @@ def test_check_and_recover_when_not_holding_skips_origin_and_resumes_at_camera()
     )
 
     flush_pos = _CURRENT_POS
-    lifted_pos = (100.0, 200.0, 50.0 + RECOVERY_LIFT_MM, 10.0, 20.0, 30.0)
+    lift_delta = (0, 0, RECOVERY_LIFT_MM, 0, 0, 0)
     assert triggered is True
     assert calls == [
         ("movel", flush_pos),
         *_IDLE_WAITS,
-        ("movel", lifted_pos),
+        ("movel", lift_delta),
         *_IDLE_WAITS,
         ("movej", "HOME"),
         *_IDLE_WAITS,

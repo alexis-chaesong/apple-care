@@ -38,3 +38,12 @@ async def pause_robot():
 async def emergency_stop_robot(payload: EmergencyStopRequest):
     bridge_manager.publish_command(command_type="EMERGENCY_STOP", task_id=payload.task_id)
     return {"result": "SUCCESS", "command": "EMERGENCY_STOP"}
+
+
+@router.post("/resume", summary="긴급 정지 이후 재개")
+async def resume_robot():
+    # estop_handler.check_and_recover()가 물리 복구(상승->홈->카메라)까지 끝낸 뒤
+    # wait_for_resume으로 이 명령을 기다림 - 운영자가 현장을 확인하고 프론트엔드
+    # 재개 버튼을 눌러야만 다음 사이클(비전 재탐지)이 진행되도록 하기 위함.
+    bridge_manager.publish_command(command_type="RESUME")
+    return {"result": "SUCCESS", "command": "RESUME"}
