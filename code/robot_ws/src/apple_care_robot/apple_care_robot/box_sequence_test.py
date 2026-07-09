@@ -52,13 +52,13 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 import DR_init
 from std_msgs.msg import String
-from apple_care_msgs.srv import SrvAppleStatus, SrvBasketStatus
+from apple_care_msgs.srv import SrvAppleStatus
 from apple_care_robot.openclose import gripper_open
 from apple_care_robot.pick_helpers import (
     pick_apple, _depth_offset_for_condition, DEFAULT_PICK_ORIENTATION,
 )
 from apple_care_robot.vision_transform import camera_to_base
-from apple_care_robot.wall_avoidance import is_within_tray_bounds
+from apple_care_robot.wall_avoidance import is_within_tray_bounds, compute_wall_aware_approach
 from apple_care_robot.status_bus import StatusBus
 from apple_care_robot.estop_handler import EstopRecoveryTracker, check_and_recover
 from apple_care_robot.safe_motion import (
@@ -82,22 +82,6 @@ TOPIC_ROBOT_COMMAND = "/robot/command"
 # (pick_and_place_voice/robot_control.py의 "/get_3d_position"과 동일한 이유).
 VISION_SERVICE_NAME = "/get_apple_status"
 
-# 세컨 카메라(basket_camera 노드) -> 백엔드(basket_bridge.py)가 캐싱한 바스켓
-# 점유 상태를 배치 직전에 조회하는 서비스. VISION_SERVICE_NAME과 동일한 이유로
-# 반드시 절대 이름이어야 함.
-BASKET_SERVICE_NAME = "/get_basket_status"
-
-# 세컨 카메라/백엔드가 아직 안 켜져 있거나 서비스 호출이 실패해도 로봇 사이클이
-# 멈추지 않도록, 응답을 못 받으면 이 시간(초) 안에 포기하고 기본값(비어있음)으로
-# 넘어간다.
-BASKET_SERVICE_TIMEOUT_SEC = 1.0
-
-# 바스켓에 이미 사과가 있다고 판단됐을 때, 그 위에 그대로 얹지 않도록 옆으로
-# 살짝 옮겨서 놓는 오프셋(mm, box 로컬 x축 기준). 바스켓 실측 크기/배치가 아직
-# 확정되지 않았으므로 placeholder 값 - 실제 하드웨어에서 겹침/충돌 없이 들어가는
-# 값으로 재조정해야 함.
-BOX_OCCUPIED_OFFSET_X_MM = 40.0
-
 # decision.pose가 None으로 온 경우(비전이 좌표를 못 준 경우)에 쓰는 임시 pick 좌표.
 FALLBACK_PICK_POS_XYZ = (492.0, 13.48, 23.39)
 
@@ -105,6 +89,34 @@ FALLBACK_PICK_POS_XYZ = (492.0, 13.48, 23.39)
 # picked_ok=False)를 대비한 재시도 횟수. 매번 CAMERA로 돌아가서 위치를 다시
 # 받아온 뒤 집기를 재시도함.
 MAX_PICK_ATTEMPTS = 3
+
+# place_apple_in_box가 힘제어 하강(force_controlled_place)을 시작하는 높이를
+# box_pos(고정 절대좌표) z보다 이만큼(mm) 더 높게 잡음. 실측으로 확인된 문제:
+# box_pos까지 바로 movel한 뒤 그 자리에서 곧바로 힘제어를 시작하면 하강 시작
+# 높이가 너무 낮아서(박스 바닥/이미 쌓인 사과와 거의 붙어있는 상태) 부드러운
+# 접촉 감지 여유가 부족했음. force_controlled_place는 어차피 최대
+# MAX_DOWN_DISTANCE(force_place.py, 165mm)까지 내려가며 접촉을 찾으므로, 이만큼
+# 더 높은 지점에서 시작해도 정상 범위 안에서 접촉을 찾음.
+#
+# 원래 30mm였는데, 시작점을 높일수록 그만큼 MAX_DOWN_DISTANCE 중 "실제 접촉면
+# 도달 전 그냥 내려가기만 하는 구간"이 늘어나서 접촉면 기준 실제 탐색 가능
+# 깊이가 줄어드는 부작용이 있었음(30mm 클리어런스면 150mm 중 120mm만 접촉면
+# 아래 탐색 가능). 그래서 10mm로 줄임 - force_place.MAX_DOWN_DISTANCE(165mm)는
+# 그대로 둬서, 오히려 접촉면 기준 탐색 깊이가 원래(150mm)보다 넉넉한 155mm로
+# 확보됨(시간 여유 TIMEOUT_SEC도 MAX_DOWN_DISTANCE 기준 그대로 유지).
+#
+# 이 값은 박스 배치(place_apple_in_box) 전용임 - 작업대 재배치
+# (place_apple_back_on_worktable)는 별도로 WORKTABLE_FORCE_START_CLEARANCE_MM을
+# 씀. 원래 place_apple_back_on_worktable을 추가할 때 이 상수를 그대로 재사용했는데,
+# 그 뒤 박스 배치 튜닝(30 -> 15 -> 10)이 의도치 않게 작업대 재배치에도 같이
+# 적용돼버렸던 문제가 있어서 분리함.
+PLACE_FORCE_START_CLEARANCE_MM = 10
+
+# place_apple_back_on_worktable 전용 힘제어 시작 높이 클리어런스(mm). 박스 배치와
+# 달리 아직 실기로 튜닝된 적 없는 새 기능이라, PLACE_FORCE_START_CLEARANCE_MM의
+# 박스 전용 튜닝(10mm)에 영향받지 않도록 원래 값(30mm)을 그대로 씀 - 실기 테스트
+# 후 필요하면 이 값만 따로 조정할 것.
+WORKTABLE_FORCE_START_CLEARANCE_MM = 30
 
 
 def main(args=None):
@@ -327,46 +339,6 @@ def main(args=None):
     while not vision_client.wait_for_service(timeout_sec=3.0):
         node.get_logger().info(f"Waiting for {VISION_SERVICE_NAME} service...")
 
-    # get_apple_status와 달리 여기서는 서비스가 뜰 때까지 블로킹 대기하지 않음 -
-    # 세컨 카메라/백엔드는 아직 선택 구성 요소라, 안 켜져 있어도 로봇 사이클이
-    # "기본값(비어있음)"으로 정상 진행되어야 하기 때문 (check_basket_occupied 참고).
-    basket_client = node.create_client(SrvBasketStatus, BASKET_SERVICE_NAME)
-
-    def check_basket_occupied(box_name: str) -> bool:
-        """
-        배치 직전에 백엔드(basket_bridge.py)가 캐싱해둔 바스켓 점유 상태를 조회.
-
-        서비스가 아직 안 떠 있거나(basket_camera/backend 미기동), 응답이 없거나,
-        아직 한 번도 유효한 판정을 못 받았으면(valid=False) 항상 False(비어있음)로
-        폴백한다 - 기본은 "없는 걸로 실행"하고, 확실히 "있다"고 확인된 경우에만
-        오프셋 배치 분기를 탄다.
-        """
-        if not basket_client.service_is_ready():
-            node.get_logger().warn(
-                f"{BASKET_SERVICE_NAME} 서비스 미기동 - {box_name} 점유 여부는 "
-                "기본값(비어있음)으로 처리합니다."
-            )
-            return False
-
-        future = basket_client.call_async(SrvBasketStatus.Request())
-        rclpy.spin_until_future_complete(node, future, timeout_sec=BASKET_SERVICE_TIMEOUT_SEC)
-        response = future.result()
-        if response is None or not response.valid:
-            node.get_logger().warn(
-                f"{BASKET_SERVICE_NAME} 응답 없음/무효 - {box_name} 점유 여부는 "
-                "기본값(비어있음)으로 처리합니다."
-            )
-            return False
-
-        occupied = {
-            "b1": response.b1_occupied,
-            "b2": response.b2_occupied,
-            "b3": response.b3_occupied,
-            "b4": response.b4_occupied,
-        }.get(box_name, False)
-        node.get_logger().info(f"{box_name} 점유 상태 조회 결과: {'있음' if occupied else '없음'}")
-        return occupied
-
     def refresh_pick_pos(condition):
         """
         그립 실패 후 재시도 직전에 호출. CAMERA 위치에 서 있는 상태에서
@@ -399,17 +371,76 @@ def main(args=None):
     set_velj(30)
     set_accj(30)
 
-    def place_apple_in_box(name, box_pos, way_pos):
+    def place_apple_back_on_worktable(pick_pos):
+        """
+        박스 접촉 감지(force_controlled_place)가 실패해서 사과를 박스에 놓지
+        못했을 때의 예외 처리. 그립을 계속 유지한 채로 복귀시키는 대신, 원래
+        집었던 자리(pick_pos, 이미 트레이 범위 안임이 검증된 좌표)로 돌아가
+        작업대(트레이)에 다시 내려놓는다.
+
+        pick_apple()과 동일하게 pick_pos가 트레이 벽 근처면 대각선 경유점을
+        먼저 거치고(compute_wall_aware_approach), box_pos에 놓을 때와 동일하게
+        force_controlled_place로 접촉(트레이 바닥/다른 사과)을 감지하며 부드럽게
+        내려간다. 접촉 감지 자체가 또 실패하더라도(예: 트레이가 예상과 다르게
+        비어있어 MAX_DOWN_DISTANCE 안에 아무것도 안 닿는 경우) 사과를 계속 쥔 채로
+        둘 수는 없으므로 그리퍼는 무조건 연다 - 이 함수의 목적 자체가 "무슨 일이
+        있어도 그립을 풀어서 다음 사이클을 진행할 수 있게 하는 것"이기 때문.
+        """
+        node.get_logger().info(f"작업대(원래 집었던 자리)에 사과 재배치: pick_pos={pick_pos}")
+
+        hover_pos, tilted_pick_pos = compute_wall_aware_approach(pick_pos, posx)
+        if hover_pos is not None:
+            node.get_logger().info(
+                f"재배치 위치도 트레이 벽 근처로 판단되어 대각선 경유점을 먼저 거칩니다: {hover_pos}"
+            )
+            do_safe_movel(hover_pos)
+
+        px, py, pz, prx, pry, prz = tilted_pick_pos
+        force_start_pos = posx(px, py, pz + WORKTABLE_FORCE_START_CLEARANCE_MM, prx, pry, prz)
+        do_safe_movel(force_start_pos)
+        wait(0.3)
+
+        contact_ok = force_controlled_place(
+            node, force_start_pos,
+            emergency_stop_event=emergency_stop, stop_node=comm_node,
+            check_hw_safety_stop=check_hw_safety_stop,
+        )
+        if contact_ok:
+            node.get_logger().info("작업대 접촉 확인 - 그리퍼를 엽니다.")
+        else:
+            node.get_logger().warn(
+                "작업대 재배치 중에도 접촉 감지 실패 - 그래도 사과를 계속 쥐고 있을 "
+                "수는 없으므로 그리퍼를 엽니다."
+            )
+
+        gripper_opened = gripper_open()
+        status_bus.publish_gripper_status(not gripper_opened)
+        if not gripper_opened:
+            node.get_logger().error("작업대 재배치: 그리퍼 오픈 실패 - 그립을 유지한 채로 복귀합니다.")
+            status_bus.publish_safety("ERR_DROP", "작업대 재배치 그리퍼 오픈 실패")
+        else:
+            estop_tracker.mark_placed()
+
+        wait(1.0)
+
+        retreat_pos = posx(px, py, pz + 50, prx, pry, prz)
+        do_safe_movel(retreat_pos)
+        wait(0.2)
+
+    def place_apple_in_box(name, box_pos, way_pos, pick_pos):
         """
         이미 집어서 그립까지 확인해둔 사과를 목적지 박스(고정 절대좌표 box_pos)에
         놓는 사이클 (집기 자체는 여기서 하지 않음).
-        홈(안전 경유) -> 웨이포인트 -> (바스켓 점유 조회) -> box_pos(또는 오프셋
-        위치)로 이동 -> 힘제어 하강 -> 그리퍼 오픈 -> 퇴피 -> 웨이포인트 -> 카메라 복귀.
-        세컨 카메라(basket_camera)/백엔드(basket_bridge.py)가 이 바스켓에 이미
-        사과가 있다고 판단하면 옆으로 오프셋을 준 위치(target_pos)로 배치하고,
-        기본(없음/서비스 미기동)이면 기존과 동일하게 box_pos 그대로 사용한다.
-        어느 쪽이든 force_controlled_place로 접촉을 감지하며 내려가므로, 오프셋이
-        정확하지 않아도 접촉 시점에 멈춰 안전함.
+        홈(안전 경유) -> 웨이포인트 -> box_pos로 이동 -> 힘제어 하강 ->
+        그리퍼 오픈 -> 퇴피 -> 웨이포인트 -> 카메라 복귀.
+        박스 안에 이미 뭔가 있는지는 비전으로 확인하지 않고, 항상 동일하게
+        box_pos까지 이동한 뒤 힘제어(force_controlled_place)로 접촉을 감지하며
+        내려감 - 그래서 이미 사과가 있어도 접촉 시점에 멈추므로 안전함.
+
+        접촉 감지 자체가 실패한 경우(박스에 못 놓은 경우)는 그립을 유지한 채로
+        복귀하지 않고, place_apple_back_on_worktable(pick_pos)로 원래 집었던
+        작업대 자리에 다시 내려놓은 뒤 카메라로 복귀해서 다음 사이클을 재개한다
+        (호출부 pick_pos 필요 - box_sequence_test.py 메인 루프의 pick_pos를 그대로 전달).
         """
         node.get_logger().info(f"--- Sorting to {name} ---")
 
@@ -421,27 +452,15 @@ def main(args=None):
         do_safe_movel(way_pos)
         wait(0.3)
 
-        # 세컨 카메라(basket_camera)/백엔드(basket_bridge.py)가 판단한 이 바스켓의
-        # 사과 유무를 조회해서, 이미 사과가 있으면 같은 자리에 그대로 얹지 않고
-        # 옆으로 오프셋을 준 위치에 놓는다. 기본(서비스 미기동/무효 응답 포함)은
-        # "없음"으로 간주해 기존과 동일하게 box_pos 그대로 사용.
-        occupied = check_basket_occupied(name)
-        if occupied:
-            bx, by, bz, brx, bry, brz = box_pos
-            target_pos = posx(bx + BOX_OCCUPIED_OFFSET_X_MM, by, bz, brx, bry, brz)
-            node.get_logger().info(
-                f"{name} 바스켓에 이미 사과가 있는 것으로 판단 - "
-                f"오프셋({BOX_OCCUPIED_OFFSET_X_MM}mm) 배치로 전환합니다."
-            )
-            status_bus.publish_safety("BASKET_OCCUPIED", f"{name} 이미 사과 있음 - 오프셋 배치")
-        else:
-            target_pos = box_pos
-
-        node.get_logger().info(f"Move to {name}")
-        do_safe_movel(target_pos)
+        node.get_logger().info(f"Move to {name} (힘제어 시작 높이: box_pos + {PLACE_FORCE_START_CLEARANCE_MM}mm)")
+        box_x, box_y, box_z, box_rx, box_ry, box_rz = box_pos
+        force_start_pos = posx(
+            box_x, box_y, box_z + PLACE_FORCE_START_CLEARANCE_MM, box_rx, box_ry, box_rz
+        )
+        do_safe_movel(force_start_pos)
         wait(0.3)
         contact_ok = force_controlled_place(
-            node, target_pos,
+            node, force_start_pos,
             emergency_stop_event=emergency_stop, stop_node=comm_node,
             check_hw_safety_stop=check_hw_safety_stop,
         )
@@ -465,24 +484,41 @@ def main(args=None):
 
             wait(1.0)
 
-            retreat_x, retreat_y, retreat_z, rx, ry, rz = target_pos
+            retreat_x, retreat_y, retreat_z, rx, ry, rz = box_pos
             retreat_pos = posx(retreat_x, retreat_y, retreat_z + 50, rx, ry, rz)
             do_safe_movel(retreat_pos)
             wait(0.2)
+
+            node.get_logger().info(f"Return to way point after {name}")
+            do_safe_movel(way_pos)
+            wait(0.3)
+
+            node.get_logger().info("Return to CAMERA position")
+            do_safe_movel(CAMERA)
+            wait(0.3)
         else:
+            # 박스 접촉 실패 - 그립 유지한 채로 복귀하지 않고, 원래 집었던
+            # 작업대 자리(pick_pos)에 다시 내려놓아 다음 사이클을 진행할 수 있게 함
+            # (place_apple_back_on_worktable 참고).
             node.get_logger().error(
-                f"{name}에서 접촉 실패 - 그립 유지한 채로 복귀. "
-                f"이 사과는 놓지 못한 상태로 다음 단계 진행됨."
+                f"{name}에서 접촉 실패 - 박스에 놓지 못해 작업대(원래 집었던 자리)에 "
+                "다시 내려놓습니다."
             )
-            status_bus.publish_safety("ERR_DROP", f"{name} 접촉 실패")
+            status_bus.publish_safety("ERR_DROP", f"{name} 접촉 실패 - 작업대에 재배치")
 
-        node.get_logger().info(f"Return to way point after {name}")
-        do_safe_movel(way_pos)
-        wait(0.3)
+            node.get_logger().info(f"Return to way point after {name}")
+            do_safe_movel(way_pos)
+            wait(0.3)
 
-        node.get_logger().info("Return to CAMERA position")
-        do_safe_movel(CAMERA)
-        wait(0.3)
+            node.get_logger().info("Return to CAMERA position (작업대 재배치 전 경유)")
+            do_safe_movel(CAMERA)
+            wait(0.3)
+
+            place_apple_back_on_worktable(pick_pos)
+
+            node.get_logger().info("Return to CAMERA position (작업대 재배치 후)")
+            do_safe_movel(CAMERA)
+            wait(0.3)
 
         return contact_ok
 
@@ -660,7 +696,7 @@ def main(args=None):
             wait(0.3)
 
             # 3) 목적지 박스로 분류해서 놓음 (경유점에서 박스 점유 확인 포함)
-            place_apple_in_box(box_name, box_pos, way_pos)
+            place_apple_in_box(box_name, box_pos, way_pos, pick_pos)
 
             # CAMERA 위치 도착 + 그리퍼는 이미 위에서 열림 -> 다음 사과를 볼 준비가
             # 된 상태이므로 READY로 되돌림 (여기서 안 되돌리면 백엔드가 "카메라

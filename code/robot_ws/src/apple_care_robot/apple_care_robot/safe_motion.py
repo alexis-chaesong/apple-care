@@ -96,24 +96,39 @@ def get_controller_robot_state(node):
         int 또는 None: 조회 성공 시 로봇 상태 코드, 실패(서비스 없음/타임아웃/
         응답 실패)하면 None.
     """
-    service_name = f"/{node.get_namespace().strip('/')}/dsr_controller2/system/get_robot_state"
-    client = node.create_client(GetRobotState, service_name)
-    if not client.wait_for_service(timeout_sec=0.3):
-        node.get_logger().warning(f"로봇 상태 조회 서비스가 준비되지 않았습니다: {service_name}")
-        return None
+    # 서비스 이름 후보를 여러 개 순서대로 시도하는 이유: stop_motion()/resume_motion()과
+    # 동일함(Jazzy/Humble 드라이버 버전에 따라 실제 서비스 경로가 다름). 실측으로 확인된
+    # 문제: 이 함수만 "dsr_controller2" 세그먼트가 포함된 Jazzy 경로 하나만 시도하다가,
+    # Humble 드라이버(dsr_controller2 세그먼트 없이 /dsr01/system/get_robot_state로 등록됨)
+    # 환경에서는 항상 "서비스가 준비되지 않았습니다" 경고만 반복 출력하고 하드웨어 안전정지
+    # 감지 자체가 죽어있었음.
+    service_names = (
+        f"/{node.get_namespace().strip('/')}/dsr_controller2/system/get_robot_state",  # 최신(Jazzy) 드라이버
+        f"/{node.get_namespace().strip('/')}/system/get_robot_state",                  # 기존(Humble) 드라이버
+        "system/get_robot_state",                                                       # 노드 네임스페이스 기준 상대 경로
+    )
 
     import rclpy  # 순환 의존 방지를 위해 필요한 지점에서만 import
-    future = client.call_async(GetRobotState.Request())
-    rclpy.spin_until_future_complete(node, future, timeout_sec=0.8)
-    if not future.done():
-        node.get_logger().warning("로봇 상태 조회 시간 초과: get_robot_state")
-        return None
 
-    result = future.result()
-    if result is None or not result.success:
-        node.get_logger().warning("로봇 상태 조회 실패: get_robot_state")
-        return None
-    return int(result.robot_state)
+    for service_name in service_names:
+        client = node.create_client(GetRobotState, service_name)
+        if not client.wait_for_service(timeout_sec=0.2):
+            continue
+
+        future = client.call_async(GetRobotState.Request())
+        rclpy.spin_until_future_complete(node, future, timeout_sec=0.8)
+        if not future.done():
+            node.get_logger().warning(f"로봇 상태 조회 시간 초과: service={service_name}")
+            return None
+
+        result = future.result()
+        if result is None or not result.success:
+            node.get_logger().warning(f"로봇 상태 조회 실패: service={service_name}")
+            return None
+        return int(result.robot_state)
+
+    node.get_logger().warning(f"로봇 상태 조회 서비스를 찾지 못했습니다: {service_names}")
+    return None
 
 
 def is_controller_in_hardware_safety_stop(node):
