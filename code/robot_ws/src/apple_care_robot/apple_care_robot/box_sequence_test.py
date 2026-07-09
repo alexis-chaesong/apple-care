@@ -58,6 +58,7 @@ from apple_care_robot.pick_helpers import (
     pick_apple, _depth_offset_for_condition, DEFAULT_PICK_ORIENTATION,
 )
 from apple_care_robot.vision_transform import camera_to_base
+from apple_care_robot.wall_avoidance import is_within_tray_bounds
 from apple_care_robot.status_bus import StatusBus
 from apple_care_robot.estop_handler import EstopRecoveryTracker, check_and_recover
 from apple_care_robot.safe_motion import (
@@ -503,6 +504,20 @@ def main(args=None):
             node.get_logger().warn("decision.pose가 없어 임시 pick 좌표를 사용합니다.")
             pick_pos = posx(*FALLBACK_PICK_POS_XYZ, *DEFAULT_PICK_ORIENTATION)
 
+        # 실측으로 확인된 문제: vision이 트레이 작업 영역을 한참 벗어난 위치를
+        # 줄 때가 있는데(오탐/depth 오차), wall_avoidance.py의 벽-근접 판정이
+        # "경계를 벗어남"과 "벽에 딱 붙어있음"을 구분 못 해서 그 위치로 그대로
+        # 접근을 시도하다 파지가 반복 실패했음. 그래서 트레이 범위(wall_avoidance.
+        # TRAY_X/Y_MIN/MAX_MM) 밖이면 애초에 집기 시도 자체를 하지 않고 건너뜀.
+        px, py, _pz, _prx, _pry, _prz = pick_pos
+        if not is_within_tray_bounds(px, py):
+            node.get_logger().error(
+                f"pick 좌표(x={px:.1f}, y={py:.1f})가 트레이 작업 영역을 벗어나서 "
+                "이 사과는 건너뜁니다 (vision 오탐/depth 오차 가능성)."
+            )
+            status_bus.publish_safety("ERR_PICK", f"{fruit} pick 좌표가 트레이 범위 밖")
+            continue
+
         node.get_logger().info(f"--- 사과: fruit={fruit} destination={destination} -> {box_name} ---")
 
         try:
@@ -544,8 +559,15 @@ def main(args=None):
                 wait(0.3)
                 refreshed_pos = refresh_pick_pos(condition)
                 if refreshed_pos is not None:
-                    pick_pos = refreshed_pos
-                # 재획득 실패 시 이전 pick_pos로 그대로 재시도함
+                    rx, ry, _rz, _rrx, _rry, _rrz = refreshed_pos
+                    if is_within_tray_bounds(rx, ry):
+                        pick_pos = refreshed_pos
+                    else:
+                        node.get_logger().error(
+                            f"재획득한 pick 좌표(x={rx:.1f}, y={ry:.1f})가 트레이 범위 밖이라 "
+                            "무시하고 이전 좌표로 재시도합니다."
+                        )
+                # 재획득 실패(또는 범위 밖) 시 이전 pick_pos로 그대로 재시도함
             wait(0.3)
 
             if not picked_ok:
