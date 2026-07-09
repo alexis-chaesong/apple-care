@@ -62,7 +62,20 @@ SPIN_TIMEOUT_SEC = 0.1
 # 웹소켓으로 계속 흘려보내야 하므로 화질보다 전송 크기를 우선함 (robot_bridge.py와 동일)
 DEBUG_IMAGE_JPEG_QUALITY = 70
 
+# HMI 화면의 Cam 2(바스켓) 표시 영역보다 원본 해상도가 훨씬 커서, 인코딩 전에
+# 이 너비 기준으로 먼저 축소해 전송량을 줄인다 (robot_bridge.py와 동일 패턴).
+DEBUG_IMAGE_MAX_WIDTH = 640
+
 BASKET_NAMES = ["b1", "b2", "b3", "b4"]
+
+
+def _resize_for_transport(frame, max_width: int):
+    """가로 max_width 기준으로 비율 유지 축소 (이미 그보다 작으면 그대로 반환)."""
+    h, w = frame.shape[:2]
+    if w <= max_width:
+        return frame
+    scale = max_width / w
+    return cv2.resize(frame, (max_width, int(h * scale)), interpolation=cv2.INTER_AREA)
 
 
 class BasketBridgeManager:
@@ -186,6 +199,7 @@ class BasketBridgeManager:
         웹소켓/큐가 감당 못함)로 반드시 JPEG 압축 후 전달한다."""
         try:
             frame = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            frame = _resize_for_transport(frame, DEBUG_IMAGE_MAX_WIDTH)
             ok, jpeg = cv2.imencode(
                 '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, DEBUG_IMAGE_JPEG_QUALITY]
             )
