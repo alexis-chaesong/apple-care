@@ -3,6 +3,8 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import pytest
+
 from apple_care_robot.estop_handler import (
     EstopRecoveryTracker, execute_recovery, check_and_recover,
     RECOVERY_LIFT_MM, RECOVERY_SETTLE_SEC, RECOVERY_POLL_SEC,
@@ -99,26 +101,48 @@ def _fake_get_current_pos():
     return _CURRENT_POS
 
 
+def _make_stateful_pos(initial=_CURRENT_POS):
+    """movel(pos)이 실제로 그 좌표로 이동한 것처럼 반영하는 가짜 위치 상태.
+    execute_recovery의 lift 검증(실제 z 변화 확인 후 재시도)이 통과하려면
+    get_current_pos()가 movel 호출을 반영해야 하므로 필요함."""
+    state = {"pos": list(initial)}
+
+    def get_current_pos():
+        return tuple(state["pos"])
+
+    def apply_movel(pos):
+        if isinstance(pos, tuple) and len(pos) == 6:
+            state["pos"] = list(pos)
+
+    return get_current_pos, apply_movel
+
+
 def test_execute_recovery_flushes_pending_target_before_lifting():
     # 정지 직전 컨트롤러의 "아직 가는 목표"가 남아있을 수 있으므로, 상승하기 전에
     # 먼저 "지금 있는 그 자리로 가라"는 명령으로 잔여 목표를 덮어써야 함
     # (force_place.py의 amovel(stop_pos, ...) 취소 기법과 동일한 원리).
     node = _FakeNode()
     calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos):
+        calls.append(("movel", pos))
+        apply_movel(pos)
+
     tracker = EstopRecoveryTracker()  # 정상 상태 (RESUME_AT_CAMERA)
     plan = tracker.get_recovery_plan()
 
     execute_recovery(
         node,
         plan,
-        movel=lambda pos: calls.append(("movel", pos)),
+        movel=movel,
         movej=lambda pos: calls.append(("movej", pos)),
         wait=lambda sec: calls.append(("wait", sec)),
         check_motion=lambda: False,  # 즉시 정지 완료로 응답
         gripper_open=lambda: True,
         home_pos="HOME",
         camera_pos="CAMERA",
-        get_current_pos=_fake_get_current_pos,
+        get_current_pos=get_current_pos,
         posx_factory=_fake_posx_factory,
     )
 
@@ -126,25 +150,66 @@ def test_execute_recovery_flushes_pending_target_before_lifting():
     assert calls[0] == ("movel", flush_pos)
 
 
+def test_execute_recovery_calls_resume_motion_before_any_movel_when_provided():
+    # 실측(E-STOP 로그)으로 확인된 문제: stop_motion()이 move_stop(HOLD)로 걸어둔
+    # 일시정지 상태를 안 풀어주면, 뒤이은 movel이 서비스 응답은 성공으로 받으면서도
+    # 실제로는 로봇이 안 움직였음. resume_motion이 주어지면 다른 어떤 이동보다도
+    # 먼저 호출돼야 함.
+    node = _FakeNode()
+    calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos):
+        calls.append(("movel", pos))
+        apply_movel(pos)
+
+    tracker = EstopRecoveryTracker()
+    plan = tracker.get_recovery_plan()
+
+    execute_recovery(
+        node,
+        plan,
+        movel=movel,
+        movej=lambda pos: calls.append(("movej", pos)),
+        wait=lambda sec: calls.append(("wait", sec)),
+        check_motion=lambda: False,
+        gripper_open=lambda: True,
+        home_pos="HOME",
+        camera_pos="CAMERA",
+        get_current_pos=get_current_pos,
+        posx_factory=_fake_posx_factory,
+        resume_motion=lambda: calls.append(("resume_motion",)),
+    )
+
+    assert calls[0] == ("resume_motion",)
+    assert calls[1][0] == "movel"
+
+
 def test_execute_recovery_lifts_up_from_current_position_after_flush():
     # 비상정지가 걸린 바로 그 자리에서, 벽/테이블과의 충돌을 피하려고
     # 잔여 목표를 지운 뒤 수직으로 최소 15cm(150mm) 들어올려야 함.
     node = _FakeNode()
     calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos):
+        calls.append(("movel", pos))
+        apply_movel(pos)
+
     tracker = EstopRecoveryTracker()  # 정상 상태 (RESUME_AT_CAMERA)
     plan = tracker.get_recovery_plan()
 
     execute_recovery(
         node,
         plan,
-        movel=lambda pos: calls.append(("movel", pos)),
+        movel=movel,
         movej=lambda pos: calls.append(("movej", pos)),
         wait=lambda sec: calls.append(("wait", sec)),
         check_motion=lambda: False,  # 즉시 정지 완료로 응답
         gripper_open=lambda: True,
         home_pos="HOME",
         camera_pos="CAMERA",
-        get_current_pos=_fake_get_current_pos,
+        get_current_pos=get_current_pos,
         posx_factory=_fake_posx_factory,
     )
 
@@ -157,6 +222,12 @@ def test_execute_recovery_lifts_up_from_current_position_after_flush():
 def test_execute_recovery_return_to_origin_moves_flush_then_lift_then_home_then_origin_then_camera():
     node = _FakeNode()
     calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos):
+        calls.append(("movel", pos))
+        apply_movel(pos)
+
     tracker = EstopRecoveryTracker()
     tracker.begin_pick_attempt(pick_pos="PICK_POS_1")
     plan = tracker.get_recovery_plan()
@@ -164,14 +235,14 @@ def test_execute_recovery_return_to_origin_moves_flush_then_lift_then_home_then_
     execute_recovery(
         node,
         plan,
-        movel=lambda pos: calls.append(("movel", pos)),
+        movel=movel,
         movej=lambda pos: calls.append(("movej", pos)),
         wait=lambda sec: calls.append(("wait", sec)),
         check_motion=lambda: False,  # 즉시 정지 완료로 응답
         gripper_open=lambda: calls.append(("gripper_open",)) or True,
         home_pos="HOME",
         camera_pos="CAMERA",
-        get_current_pos=_fake_get_current_pos,
+        get_current_pos=get_current_pos,
         posx_factory=_fake_posx_factory,
     )
 
@@ -195,20 +266,26 @@ def test_execute_recovery_return_to_origin_moves_flush_then_lift_then_home_then_
 def test_execute_recovery_resume_at_camera_skips_origin_and_gripper():
     node = _FakeNode()
     calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos):
+        calls.append(("movel", pos))
+        apply_movel(pos)
+
     tracker = EstopRecoveryTracker()  # 집지 않은 정상 상태
 
     plan = tracker.get_recovery_plan()
     execute_recovery(
         node,
         plan,
-        movel=lambda pos: calls.append(("movel", pos)),
+        movel=movel,
         movej=lambda pos: calls.append(("movej", pos)),
         wait=lambda sec: calls.append(("wait", sec)),
         check_motion=lambda: False,  # 즉시 정지 완료로 응답
         gripper_open=lambda: calls.append(("gripper_open",)) or True,
         home_pos="HOME",
         camera_pos="CAMERA",
-        get_current_pos=_fake_get_current_pos,
+        get_current_pos=get_current_pos,
         posx_factory=_fake_posx_factory,
     )
 
@@ -226,23 +303,91 @@ def test_execute_recovery_resume_at_camera_skips_origin_and_gripper():
     ]
 
 
+# ── lift 검증/재시도 회귀 테스트 ────────────────────────────────────────
+# 실측(E-STOP 로그)으로 확인된 문제: lift movel 직후 check_motion()이 타이밍
+# 레이스로 "정지 확인 완료"를 오판(폴링 0회)해서, 실제로는 로봇이 전혀 안
+# 움직였는데도(z 변화 -0.0mm) 다음 단계(HOME)로 넘어가버렸음. 이제
+# execute_recovery는 매 시도 뒤 실제 z 변화를 검증해 부족하면 재시도해야 함.
+
+def test_execute_recovery_retries_lift_when_first_attempt_does_not_actually_move():
+    node = _FakeNode()
+    tracker = EstopRecoveryTracker()
+    plan = tracker.get_recovery_plan()
+
+    calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+    lift_target_z = _CURRENT_POS[2] + RECOVERY_LIFT_MM
+    lift_attempts = {"n": 0}
+
+    def movel(pos):
+        calls.append(("movel", pos))
+        if isinstance(pos, tuple) and len(pos) == 6 and pos[2] == lift_target_z:
+            lift_attempts["n"] += 1
+            if lift_attempts["n"] == 1:
+                return  # 첫 시도는 명령이 씹혀서 실제로는 로봇이 안 움직인 것처럼 흉내
+        apply_movel(pos)
+
+    execute_recovery(
+        node,
+        plan,
+        movel=movel,
+        movej=lambda pos: calls.append(("movej", pos)),
+        wait=lambda sec: calls.append(("wait", sec)),
+        check_motion=lambda: False,
+        gripper_open=lambda: True,
+        home_pos="HOME",
+        camera_pos="CAMERA",
+        get_current_pos=get_current_pos,
+        posx_factory=_fake_posx_factory,
+    )
+
+    assert lift_attempts["n"] == 2  # 1회 실패 + 1회 재시도로 성공
+    assert get_current_pos()[2] == lift_target_z
+    assert ("movej", "HOME") in calls  # 재시도 성공 후 다음 단계로 정상 진행됨
+
+
+def test_execute_recovery_raises_when_lift_never_actually_moves():
+    # 재시도를 다 써도 z가 안 바뀌면(실제 상승 실패), 벽/박스 충돌 위험이 있으므로
+    # HOME/원위치/CAMERA로 넘어가지 않고 예외를 던져 복구를 중단해야 함.
+    node = _FakeNode()
+    tracker = EstopRecoveryTracker()
+    plan = tracker.get_recovery_plan()
+
+    with pytest.raises(RuntimeError):
+        execute_recovery(
+            node,
+            plan,
+            movel=lambda pos: None,  # 계속 씹혀서 로봇이 절대 안 움직임
+            movej=lambda pos: None,
+            wait=lambda sec: None,
+            check_motion=lambda: False,
+            gripper_open=lambda: True,
+            home_pos="HOME",
+            camera_pos="CAMERA",
+            get_current_pos=_fake_get_current_pos,
+            posx_factory=_fake_posx_factory,
+        )
+
+
 def test_execute_recovery_logs_error_when_gripper_open_fails():
     node = _FakeNode()
     tracker = EstopRecoveryTracker()
     tracker.begin_pick_attempt(pick_pos="PICK_POS_1")
     plan = tracker.get_recovery_plan()
 
+    get_current_pos, apply_movel = _make_stateful_pos()
+
     execute_recovery(
         node,
         plan,
-        movel=lambda pos: None,
+        movel=apply_movel,
         movej=lambda pos: None,
         wait=lambda sec: None,
         check_motion=lambda: False,
         gripper_open=lambda: False,
         home_pos="HOME",
         camera_pos="CAMERA",
-        get_current_pos=_fake_get_current_pos,
+        get_current_pos=get_current_pos,
         posx_factory=_fake_posx_factory,
     )
 
@@ -302,17 +447,22 @@ def test_check_and_recover_runs_recovery_and_clears_event_when_triggered():
     event = threading.Event()
     event.set()
     calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos):
+        calls.append(("movel", pos))
+        apply_movel(pos)
 
     triggered = check_and_recover(
         node, status_bus, tracker, event,
-        movel=lambda pos: calls.append(("movel", pos)),
+        movel=movel,
         movej=lambda pos: calls.append(("movej", pos)),
         wait=lambda sec: calls.append(("wait", sec)),
         check_motion=lambda: False,  # 즉시 정지 완료로 응답
         gripper_open=lambda: calls.append(("gripper_open",)) or True,
         home_pos="HOME",
         camera_pos="CAMERA",
-        get_current_pos=_fake_get_current_pos,
+        get_current_pos=get_current_pos,
         posx_factory=_fake_posx_factory,
     )
 
@@ -393,17 +543,22 @@ def test_check_and_recover_proceeds_when_hw_safety_stop_check_reports_clear():
     event = threading.Event()
     event.set()
     calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos):
+        calls.append(("movel", pos))
+        apply_movel(pos)
 
     triggered = check_and_recover(
         node, status_bus, tracker, event,
-        movel=lambda pos: calls.append(("movel", pos)),
+        movel=movel,
         movej=lambda pos: calls.append(("movej", pos)),
         wait=lambda sec: calls.append(("wait", sec)),
         check_motion=lambda: False,
         gripper_open=lambda: calls.append(("gripper_open",)) or True,
         home_pos="HOME",
         camera_pos="CAMERA",
-        get_current_pos=_fake_get_current_pos,
+        get_current_pos=get_current_pos,
         posx_factory=_fake_posx_factory,
         check_hw_safety_stop=lambda: (False, ""),
     )
@@ -422,17 +577,22 @@ def test_check_and_recover_when_not_holding_skips_origin_and_resumes_at_camera()
     event = threading.Event()
     event.set()
     calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos):
+        calls.append(("movel", pos))
+        apply_movel(pos)
 
     triggered = check_and_recover(
         node, status_bus, tracker, event,
-        movel=lambda pos: calls.append(("movel", pos)),
+        movel=movel,
         movej=lambda pos: calls.append(("movej", pos)),
         wait=lambda sec: calls.append(("wait", sec)),
         check_motion=lambda: False,  # 즉시 정지 완료로 응답
         gripper_open=lambda: calls.append(("gripper_open",)) or True,
         home_pos="HOME",
         camera_pos="CAMERA",
-        get_current_pos=_fake_get_current_pos,
+        get_current_pos=get_current_pos,
         posx_factory=_fake_posx_factory,
     )
 

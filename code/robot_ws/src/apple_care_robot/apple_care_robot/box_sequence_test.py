@@ -67,6 +67,7 @@ from apple_care_robot.status_bus import StatusBus
 from apple_care_robot.estop_handler import EstopRecoveryTracker, check_and_recover
 from apple_care_robot.safe_motion import (
     safe_movel, safe_movej, EmergencyStopError, is_controller_in_hardware_safety_stop,
+    resume_motion,
 )
 
 ROBOT_ID = "dsr01"
@@ -187,15 +188,36 @@ def main(args=None):
         # 그대로 쓰면 복구 이동 자체가 시작하자마자 다시 예외를 던져 복구가 영원히
         # 끝나지 않음. 그래서 emergency_stop을 재확인하지 않는 순수 이동
         # (amovel/amovej + check_motion 폴링)만 씀.
+        def _recovery_movel(pos):
+            ret = amovel(pos, ref=DR_BASE)
+            # amovel()은 컨트롤러가 명령을 실제로 접수했는지(0=성공, 그 외=거부)를
+            # 반환하는데 지금까지는 이 값을 그냥 버렸음 - lift 단계가 폴링상으로는
+            # "정지 확인 완료"인데 실제 z는 전혀 안 바뀌는 사례가 실측으로 반복
+            # 확인됐고(재시도해도 동일), 이게 check_motion() 타이밍 레이스가 아니라
+            # 컨트롤러가 애초에 명령을 거부한 것인지 다음 발생 시 바로 알 수 있도록 남김.
+            if ret != 0:
+                node.get_logger().error(f"[E-STOP] amovel 명령이 거부됐습니다(ret={ret}): pos={pos}")
+            return ret
+
+        def _recovery_movej(pos):
+            ret = amovej(pos)
+            if ret != 0:
+                node.get_logger().error(f"[E-STOP] amovej 명령이 거부됐습니다(ret={ret}): pos={pos}")
+            return ret
+
         return check_and_recover(
             node, status_bus, estop_tracker, emergency_stop,
-            movel=lambda pos: amovel(pos, ref=DR_BASE), movej=lambda pos: amovej(pos), wait=wait,
+            movel=_recovery_movel, movej=_recovery_movej, wait=wait,
             check_motion=check_motion, gripper_open=gripper_open,
             home_pos=HOME, camera_pos=CAMERA,
             get_current_pos=lambda: get_current_posx(DR_BASE)[0], posx_factory=posx,
             # comm_node를 넘기는 이유: stop_motion()과 동일하게 DSR 제어용 메인 node를
             # 여기서 또 spin하면 충돌 위험이 있음 (comm_node는 이미 별도 스레드에서 spin 중).
             check_hw_safety_stop=lambda: is_controller_in_hardware_safety_stop(comm_node),
+            # E-STOP 시 stop_motion()이 move_stop(HOLD)로 걸어둔 일시정지 상태를
+            # 복구 이동 전에 풀어줌 - 실측으로 확인된 문제(안 풀면 movel이 성공
+            # 응답을 받고도 실제로는 안 움직임) 참고: safe_motion.resume_motion.
+            resume_motion=lambda: resume_motion(comm_node),
         )
 
     # ------------------------------------------------------------------

@@ -82,6 +82,14 @@ RECOVERY_POLL_SEC = 0.05  # check_motion()으로 정지 여부를 확인하는 �
 # 다음 확인에서 "이동 중"이 다시 잡히면 카운트가 리셋되므로 구조적으로 안전함.
 REQUIRED_IDLE_CONFIRMATIONS = 3
 
+# 상승(lift) 이동이 실제로 일어났는지 검증할 때 쓰는 값들. 실측(E-STOP 로그)으로
+# lift movel이 check_motion() 타이밍 레이스 때문에 "정지 확인 완료"로 오판되면서도
+# 실제로는 로봇이 전혀 안 움직인 사례(z 변화 -0.0mm)가 반복 확인됐음 - 그래서
+# execute_recovery()의 lift 단계는 매 시도 뒤 실제 z 변화량을 검증하고, 목표치의
+# LIFT_MIN_ACHIEVED_FRAC 미만이면 상승이 안 된 것으로 보고 재시도함.
+LIFT_RETRY_COUNT = 3
+LIFT_MIN_ACHIEVED_FRAC = 0.5
+
 
 def _wait_until_fully_stopped(check_motion, wait, settle_sec, node=None, label=""):
     """
@@ -133,9 +141,19 @@ def execute_recovery(
     posx_factory: Callable[..., Any],
     lift_mm: int = RECOVERY_LIFT_MM,
     settle_sec: float = RECOVERY_SETTLE_SEC,
+    resume_motion: Optional[Callable[[], Any]] = None,
 ) -> None:
     """
     plan에 따라 실제 복구 동작을 수행.
+
+    resume_motion: 넘겨주면(예: safe_motion.resume_motion을 노드에 바인딩한 callable),
+        복구 이동을 내보내기 전에 한 번 호출함. E-STOP 시 stop_motion()이
+        move_stop(stop_mode=DR_HOLD)로 로봇을 "일시정지" 상태로 만드는데, 실측으로
+        확인된 문제 - 이 상태에서 곧바로 새 movel을 내리면 서비스 응답은
+        success=True로 오지만(명령 자체는 접수됨) 로봇이 물리적으로 전혀 안 움직이는
+        경우가 있었음(Doosan 드라이버는 move_stop/move_resume이 쌍으로 설계돼 있는데
+        move_resume을 호출하는 곳이 코드베이스에 없었음). None이면(기본값) 호출하지
+        않음 - 하위 호환용.
 
     movel/gripper_open은 실제로는 DSR_ROBOT2.movel / openclose.gripper_open이지만,
     여기서는 주입받아 사용하므로 이 함수 자체는 하드웨어 의존 없이 테스트 가능함.
@@ -153,7 +171,7 @@ def execute_recovery(
        기법과 동일한 원리 - motion/move_stop으로 물리적으로는 멈춰도, 아직
        가려던 목표가 컨트롤러 내부에 남아있으면 다음 명령과 의사 잔여 방향으로
        움직일 수 있음).
-    2) 그 다음 수직으로만 lift_mm(기본 400mm)만큼 들어올림. HOME/원위치/
+    2) 그 다음 수직으로만 lift_mm(기본 200mm)만큼 들어올림. HOME/원위치/
        CAMERA로 바로 이동하면, 멈춘 위치가 벽/테이블에 가까울 때(예: 박스
        웨이포인트 근처) 그 경로 도중 충돌할 수 있어서, 다른 어떤 이동보다
        먼저 이 위치에서 거침.
@@ -165,32 +183,53 @@ def execute_recovery(
     """
     node.get_logger().info(f"[E-STOP] 복구 시작: {plan.action}")
 
+    if resume_motion is not None:
+        # E-STOP 시 stop_motion()이 걸어둔 Hold 상태를 풀어줌 - 이걸 안 하면
+        # 아래 movel들이 서비스 응답은 성공으로 받으면서도 실제로는 움직이지
+        # 않는 문제가 있었음(위 resume_motion 인자 설명 참고).
+        resume_motion()
+
     current_x, current_y, current_z, current_rx, current_ry, current_rz = get_current_pos()
 
     flush_pos = posx_factory(current_x, current_y, current_z, current_rx, current_ry, current_rz)
     movel(flush_pos)
     _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="flush")
 
-    lifted_pos = posx_factory(
-        current_x, current_y, current_z + lift_mm, current_rx, current_ry, current_rz
-    )
-    node.get_logger().info(
-        f"[E-STOP] 충돌 회피를 위해 {lift_mm}mm 상승합니다. "
-        f"(목표 z={current_z + lift_mm:.1f}, 현재 z={current_z:.1f})"
-    )
-    movel(lifted_pos)
-    _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="lift")
+    # 실측(E-STOP 로그)으로 확인된 문제: flush movel 직후 곧바로 movel(lift)을
+    # 내리면, check_motion()이 컨트롤러 내부 상태가 "이동 중"으로 갱신되기 전에
+    # REQUIRED_IDLE_CONFIRMATIONS(3연속 idle)를 만족해버려서(폴링 0회) 실제로는
+    # 로봇이 전혀 안 움직였는데도 "정지 확인 완료"로 오판하는 경우가 있었음
+    # (목표 z 대비 실제 상승량이 거의 0mm). 이 상태로 HOME/원위치/CAMERA로
+    # 넘어가면 여전히 상승 전 높이라 벽/박스와 충돌 위험이 그대로 남음. 그래서
+    # 매 시도 뒤 실제 z 변화량을 재서 검증하고, 목표치의 LIFT_MIN_ACHIEVED_FRAC
+    # 미만이면 상승이 실행되지 않은 것으로 보고 재시도함.
+    for attempt in range(1, LIFT_RETRY_COUNT + 1):
+        cx, cy, cz, crx, cry, crz = get_current_pos()
+        lifted_pos = posx_factory(cx, cy, cz + lift_mm, crx, cry, crz)
+        node.get_logger().info(
+            f"[E-STOP] 충돌 회피를 위해 {lift_mm}mm 상승합니다. "
+            f"(목표 z={cz + lift_mm:.1f}, 현재 z={cz:.1f}, 시도 {attempt}/{LIFT_RETRY_COUNT})"
+        )
+        movel(lifted_pos)
+        _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="lift")
 
-    # "lift" 구간이 유독 폴링 0회로 나오는 문제(실측 확인) - check_motion() 타이밍
-    # 레이스가 아니라 애초에 목표 지점이 도달 불가능해서(작업공간/관절 한계 등)
-    # amovel() 명령 자체가 무시/실패해 로봇이 전혀 안 움직였을 가능성을 확인하기
-    # 위해, 실제로 z가 얼마나 움직였는지 직접 재서 남김.
-    actual_z_after_lift = get_current_pos()[2]
-    node.get_logger().info(
-        f"[E-STOP][lift] 실제 이동 후 z={actual_z_after_lift:.1f} "
-        f"(기대값={current_z + lift_mm:.1f}, 차이={actual_z_after_lift - current_z:.1f}mm - "
-        f"이 차이가 {lift_mm}mm에 훨씬 못 미치면 상승 자체가 실패/거부된 것)"
-    )
+        actual_z_after_lift = get_current_pos()[2]
+        achieved_mm = actual_z_after_lift - cz
+        node.get_logger().info(
+            f"[E-STOP][lift] 실제 이동 후 z={actual_z_after_lift:.1f} "
+            f"(기대값={cz + lift_mm:.1f}, 실제 상승량={achieved_mm:.1f}mm / 목표 {lift_mm}mm)"
+        )
+        if achieved_mm >= lift_mm * LIFT_MIN_ACHIEVED_FRAC:
+            break
+        node.get_logger().error(
+            f"[E-STOP][lift] 상승이 실행되지 않은 것으로 보입니다(실제 상승량 {achieved_mm:.1f}mm) - 재시도합니다."
+        )
+    else:
+        raise RuntimeError(
+            f"[E-STOP] {LIFT_RETRY_COUNT}회 재시도에도 상승(lift)이 실행되지 않았습니다 - "
+            "충돌 위험이 있어 나머지 복구 이동(HOME/원위치/CAMERA)을 중단합니다. "
+            "하드웨어/컨트롤러 상태를 확인하세요."
+        )
 
     movej(home_pos)
     _wait_until_fully_stopped(check_motion, wait, settle_sec, node=node, label="home")
@@ -222,6 +261,7 @@ def check_and_recover(
     get_current_pos: Callable[[], Any],
     posx_factory: Callable[..., Any],
     check_hw_safety_stop: Optional[Callable[[], "tuple"]] = None,
+    resume_motion: Optional[Callable[[], Any]] = None,
 ) -> bool:
     """
     emergency_stop_event(threading.Event)가 걸려 있으면 복구를 수행하고 True를 반환.
@@ -239,6 +279,8 @@ def check_and_recover(
         있어서, 하드웨어가 안전정지 중이면 복구를 시작하지 않고 emergency_stop_event를
         그대로 걸어둔 채 True만 반환함(호출부는 다음 루프에서 다시 확인하게 됨).
         None이면(기본값) 이 확인을 건너뜀 - 하위 호환용.
+
+    resume_motion: execute_recovery()로 그대로 전달됨 - safe_motion.resume_motion 참고.
 
     복구 후에는 emergency_stop_event를 clear()해서 다음 루프에서 다시 걸리지 않게
     하고, "무조건 CAMERA로 보내서 재개" 정책에 따라 별도의 재가 명령 없이
@@ -272,6 +314,7 @@ def check_and_recover(
         gripper_open=gripper_open,
         home_pos=home_pos, camera_pos=camera_pos,
         get_current_pos=get_current_pos, posx_factory=posx_factory,
+        resume_motion=resume_motion,
     )
 
     if plan.action == "RETURN_TO_ORIGIN":

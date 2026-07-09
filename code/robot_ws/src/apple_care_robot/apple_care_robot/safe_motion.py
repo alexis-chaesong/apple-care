@@ -32,7 +32,7 @@ check_and_recover)로 넘어갈 수 있음.
 
 import time as _time
 
-from dsr_msgs2.srv import MoveStop, GetRobotState
+from dsr_msgs2.srv import MoveStop, MoveResume, GetRobotState
 
 # MoveStop.srv 기준 stop_mode 값 (참고용 전체 목록):
 #   0 = DR_QSTOP_STO (Quick stop, 안전 토크 차단 - 보통 재가동하려면 파트/원점 재설정 필요)
@@ -191,6 +191,54 @@ def stop_motion(node, stop_mode: int = STOP_MODE_HOLD) -> bool:
 
     node.get_logger().error(
         f"[safe_motion] motion/move_stop 서비스를 찾지 못했거나 호출에 실패했습니다: {service_names}"
+    )
+    return False
+
+
+def resume_motion(node) -> bool:
+    """
+    dsr_controller2가 제공하는 motion/move_resume 서비스를 호출해서, stop_motion()의
+    move_stop(stop_mode=DR_HOLD)으로 걸린 "일시정지(Hold)" 상태를 실제로 풀어준다.
+
+    실측(E-STOP 로그)으로 확인된 문제: move_stop(HOLD) 이후 곧바로 새 movel/amovel을
+    내려도 서비스 응답은 success=True로 오는데(명령 자체는 접수됨) 로봇이 물리적으로
+    전혀 안 움직이는 사례가 반복됐음. Doosan 드라이버(dsr_controller2.cpp의
+    move_resume_cb -> Drfl->move_resume())를 보면 move_stop과 move_resume이 쌍으로
+    설계되어 있는데, 이 코드베이스 어디에도 move_resume을 호출하는 곳이 없었음 -
+    stop_motion()과 마찬가지로 DSR_ROBOT2.py도 이 서비스를 파이썬 함수로 감싸주지
+    않아서 여기서 직접 서비스 클라이언트를 만들어 호출한다.
+
+    Args:
+        node: 서비스 클라이언트를 만들 rclpy 노드 (stop_motion()과 동일하게 보통 comm_node).
+
+    Returns:
+        bool: 재개 명령이 성공적으로 전달됐으면 True.
+    """
+    service_names = (
+        f"/{node.get_namespace().strip('/')}/dsr_controller2/motion/move_resume",
+        f"/{node.get_namespace().strip('/')}/motion/move_resume",
+        "motion/move_resume",
+    )
+
+    for service_name in service_names:
+        client = node.create_client(MoveResume, service_name)
+        if not client.wait_for_service(timeout_sec=0.2):
+            continue
+
+        future = client.call_async(MoveResume.Request())
+
+        import rclpy  # 순환 의존 방지를 위해 필요한 지점에서만 import
+        rclpy.spin_until_future_complete(node, future, timeout_sec=0.8)
+
+        result = future.result() if future.done() else None
+        if result is not None and result.success:
+            node.get_logger().warning(f"[safe_motion] 재개 성공: service={service_name}")
+            return True
+
+        node.get_logger().error(f"[safe_motion] 재개 응답 실패: service={service_name}")
+
+    node.get_logger().error(
+        f"[safe_motion] motion/move_resume 서비스를 찾지 못했거나 호출에 실패했습니다: {service_names}"
     )
     return False
 
