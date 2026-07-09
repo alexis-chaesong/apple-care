@@ -12,10 +12,16 @@ PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
 YOLO_MODEL_FILENAME = "best_apple_care.pt"
 YOLO_MODEL_PATH = os.path.join(PACKAGE_PATH, "resource", YOLO_MODEL_FILENAME)
 
-CLASS_NAMES = ["apple_normal", "apple_rotten", "apple_damaged", "apple_small"]
+
+# 실제 체크포인트(best_apple_care.pt)에 저장된 클래스 순서 그대로 - 재학습하면서
+# apple_small이 빠지고 그 자리(인덱스 3)에 basket이 들어감(모델 자체의 .names로
+# 직접 확인함). apple_small은 이제 YOLO가 직접 내는 라벨이 아니고, 아래
+# size_classifier.SizeClassifierMixin이 depth 실측 지름으로 apple_normal/damaged를
+# 사후 재분류해서만 나오는 상태값임 - 그건 그대로 유지됨.
+CLASS_NAMES = ["apple_normal", "apple_rotten", "apple_damaged", "basket"]
 
 # 이 값보다 낮은 confidence로 감지된 박스는 "unknown"으로 취급한다
-# (apple_normal/rotten/damaged/small로 학습된 4클래스 중 어디에도 확신 없다는 뜻)
+# (apple_normal/rotten/damaged/basket 중 어디에도 확신 없다는 뜻)
 MIN_KNOWN_CONFIDENCE = 0.4
 
 # 프레임 수집 단계에서 후보로 남길 최소 confidence (이후 최종 판정은 MIN_KNOWN_CONFIDENCE로 함)

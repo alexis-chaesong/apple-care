@@ -22,14 +22,9 @@ box_sequence_test.py (유일한 실행 진입점 - pick_helpers.py에서 공용 
     normal_box     -> b3 (경유점: way1)
     discard_box    -> b4 (경유점: way2)
 
-박스에 이미 사과가 있는지는 더 이상 가정(하드코딩)하지 않음. 카메라가 그리퍼에
-고정된 eye-in-hand 구조라(vision_transform.py 참고) 박스로 가는 길을 어차피
-거치는 웨이포인트에서는 그 카메라로 박스 안이 보임 - 이 점을 이용해서 박스별로
-따로 조사하러 접근하지 않고, 웨이포인트에 도착한 김에 get_apple_status를 한 번 더
-호출해 이미 뭔가(사과) 있는지 확인함(detect_box_occupancy 참고). "empty"가 아니면
-(사과든, 확신치 않은 "unknown"이든) 안전하게 "이미 뭔가 있음"으로 보고 그 다음부터
-조심 접근(hover 위치까지 진입 + 낮춘 힘제어 임계값)을, "empty"면 기존처럼 바로
-접근함.
+박스 안에 이미 사과가 있는지는 비전으로 확인하지 않음 - place_apple_in_box는
+항상 동일하게 box_pos(고정 절대좌표)까지 이동한 뒤 force_controlled_place로
+접촉을 감지하며 내려가므로, 이미 사과가 있어도 접촉 시점에 멈춰서 안전함.
 
 그립 자체가 실패하는 경우(사과를 놓침)에도 pick_pos 하나로 계속 헛손질하지 않도록,
 CAMERA로 돌아가 get_apple_status를 다시 호출해 최신 위치를 받아온 뒤 재시도함
@@ -113,11 +108,7 @@ def main(args=None):
         amovel, amovej, check_motion, DR_BASE,
         DR_MV_MOD_ABS, DR_MV_MOD_REL,
     )
-    from apple_care_robot.force_place import (
-        force_controlled_place,
-        CAREFUL_APPROACH_VEL, CAREFUL_APPROACH_ACC,
-        EXISTING_APPLE_HOVER_CLEARANCE, EXISTING_APPLE_FORCE_THRESHOLD,
-    )
+    from apple_care_robot.force_place import force_controlled_place
 
     # 좌표 정의
     HOME = posj(0, 0, 90, 0, 90, 0)
@@ -131,9 +122,7 @@ def main(args=None):
     B4 = posx(786.27, 185.37, 40.23, 8.77, 158.32, 91.18)
 
     # destination -> (박스 이름, 박스 좌표, 경유점). 실제 물리 배치 확정:
-    # b1=가공용, b2=못난이, b3=정상, b4=폐기. 박스에 이미 사과가 있는지는 더 이상
-    # 여기서 가정하지 않고, place_apple_in_box가 매번 detect_box_occupancy()로
-    # 카메라를 통해 직접 확인함.
+    # b1=가공용, b2=못난이, b3=정상, b4=폐기.
     DESTINATION_TO_BOX = {
         "processing_box": ("b1", B1, WAY1),
         "ugly_box":       ("b2", B2, WAY1),
@@ -348,36 +337,6 @@ def main(args=None):
         )
         return posx(bx, by, bz, *DEFAULT_PICK_ORIENTATION)
 
-    def detect_box_occupancy():
-        """
-        (로봇이 지금 박스로 가는 길의 웨이포인트에 서있어서 그리퍼에 고정된
-        카메라가 박스 안을 보고 있다고 가정) get_apple_status를 한 번 호출해서
-        박스 안에 이미 뭔가(사과) 있는지를 True/False로 판단한다.
-        박스 전용으로 따로 조사하러 접근하지 않고, 어차피 지나가는 웨이포인트에서
-        바로 확인함. status가 정확히 뭔지는 신경 쓰지 않고 "empty"인지 아닌지만
-        봄 - "unknown"도 박스 안에 뭔가 있다는 뜻이므로 안전하게 "있음"으로
-        취급해서 조심 접근을 유도한다 (애매하다고 "없음"으로 취급하면 blind
-        접근하다 부딪힐 수 있음). 서비스 호출 자체가 실패하면 마찬가지로
-        안전한 쪽(있음)으로 취급한다.
-        """
-        future = vision_client.call_async(SrvAppleStatus.Request())
-        rclpy.spin_until_future_complete(node, future)
-        response = future.result()
-
-        if response is None:
-            node.get_logger().warn(
-                f"{VISION_SERVICE_NAME} 서비스 호출 실패 - 박스 상태를 확인할 수 없어 "
-                "안전하게 '이미 사과가 있음'으로 간주합니다."
-            )
-            return True
-
-        has_apple = response.status != "empty"
-        node.get_logger().info(
-            f"박스 점검: status={response.status} -> "
-            f"{'이미 사과 있음(조심 접근)' if has_apple else '비어 있음(기존 접근)'}"
-        )
-        return has_apple
-
     set_velx(45, 30)
     set_accx(45, 30)
     set_velj(30)
@@ -385,13 +344,13 @@ def main(args=None):
 
     def place_apple_in_box(name, box_pos, way_pos):
         """
-        이미 집어서 그립까지 확인해둔 사과를 목적지 박스에 놓는 사이클
-        (집기 자체는 여기서 하지 않음).
-        홈(안전 경유) -> 웨이포인트(도착한 김에 카메라로 박스 안 확인) ->
-        [사과 있으면: box_pos보다 높은 위치로 조심히 접근 후 힘제어 하강 |
-        없으면: box_pos까지 바로 내려가서 기존 방식대로 힘제어 하강] ->
-        그리퍼 오픈 -> 퇴피 -> 웨이포인트 -> 카메라 복귀
-        (박스가 비어있어도 항상 힘제어로 하강함 - 고속/생략 없음)
+        이미 집어서 그립까지 확인해둔 사과를 목적지 박스(고정 절대좌표 box_pos)에
+        놓는 사이클 (집기 자체는 여기서 하지 않음).
+        홈(안전 경유) -> 웨이포인트 -> box_pos로 이동 -> 힘제어 하강 ->
+        그리퍼 오픈 -> 퇴피 -> 웨이포인트 -> 카메라 복귀.
+        박스 안에 이미 뭔가 있는지는 비전으로 확인하지 않고, 항상 동일하게
+        box_pos까지 이동한 뒤 힘제어(force_controlled_place)로 접촉을 감지하며
+        내려감 - 그래서 이미 사과가 있어도 접촉 시점에 멈추므로 안전함.
         """
         node.get_logger().info(f"--- Sorting to {name} ---")
 
@@ -403,32 +362,14 @@ def main(args=None):
         do_safe_movel(way_pos)
         wait(0.3)
 
-        node.get_logger().info(f"{name}: 경유점에서 박스 상태를 확인합니다.")
-        has_existing_apple = detect_box_occupancy()
-
-        if has_existing_apple:
-            hx, hy, hz, hrx, hry, hrz = box_pos
-            safe_hover_pos = posx(hx, hy, hz + EXISTING_APPLE_HOVER_CLEARANCE, hrx, hry, hrz)
-            node.get_logger().info(
-                f"{name}: 박스 안에 사과가 있음을 확인 - 원래 hover보다 "
-                f"{EXISTING_APPLE_HOVER_CLEARANCE}mm 위에서부터 조심히 접근합니다."
-            )
-            do_safe_movel(safe_hover_pos, vel=CAREFUL_APPROACH_VEL, acc=CAREFUL_APPROACH_ACC)
-            wait(0.3)
-            contact_ok = force_controlled_place(
-                node, safe_hover_pos, force_threshold=EXISTING_APPLE_FORCE_THRESHOLD,
-                emergency_stop_event=emergency_stop, stop_node=comm_node,
-                check_hw_safety_stop=check_hw_safety_stop,
-            )
-        else:
-            node.get_logger().info(f"{name}: 박스가 비어 있음을 확인 - 기존 접근 방법대로 진행합니다.")
-            do_safe_movel(box_pos)
-            wait(0.3)
-            contact_ok = force_controlled_place(
-                node, box_pos,
-                emergency_stop_event=emergency_stop, stop_node=comm_node,
-                check_hw_safety_stop=check_hw_safety_stop,
-            )
+        node.get_logger().info(f"Move to {name}")
+        do_safe_movel(box_pos)
+        wait(0.3)
+        contact_ok = force_controlled_place(
+            node, box_pos,
+            emergency_stop_event=emergency_stop, stop_node=comm_node,
+            check_hw_safety_stop=check_hw_safety_stop,
+        )
 
         status_bus.set_motion("PLACING", name)
 

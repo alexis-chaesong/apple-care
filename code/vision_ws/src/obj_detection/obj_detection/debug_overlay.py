@@ -125,7 +125,12 @@ class DebugOverlayMixin:
                 inner_depth is not None and ring_depth is not None
                 and (ring_depth - inner_depth) >= HEIGHT_DIFF_MARGIN_MM
             )
-            box_color = (0, 255, 0) if depth_ok else (0, 0, 255)  # OK=초록, FAIL=빨강
+            if label == "basket":
+                # basket은 사과 depth 높이차 판정과 무관한 클래스라 depth_ok로
+                # 색을 정하지 않고 고정 파란색으로 표시(BGR이라 (255, 0, 0)).
+                box_color = (255, 0, 0)  # 파란색 = basket
+            else:
+                box_color = (0, 255, 0) if depth_ok else (0, 0, 255)  # OK=초록, FAIL=빨강
             cv2.rectangle(colormap, (x1, y1), (x2, y2), box_color, 2)
 
             if not depth_ok:
