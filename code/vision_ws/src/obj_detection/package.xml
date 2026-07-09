@@ -15,8 +15,9 @@
   <exec_depend condition="$ROS_DISTRO != 'humble'">cv_bridge</exec_depend>
   <exec_depend>apple_care_msgs</exec_depend>
   <exec_depend>python3-pymodbus</exec_depend>
-  <!-- basket_camera.launch.py가 세컨 RealSense를 띄우기 위해 include -->
-  <exec_depend>realsense2_camera</exec_depend>
+  <!-- basket_camera.py는 RealSense가 아니라 일반 V4L2 웹캠을 cv2.VideoCapture로
+       직접 열므로 realsense2_camera는 불필요. basket_camera.launch.py 자체를
+       위한 launch/launch_ros만 필요. -->
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <!-- prepare_camera.py는 로봇 이동을 위해 DSR_ROBOT2를 가져다 씀. 이건 colcon

@@ -30,7 +30,7 @@ setup(
             'object_detection = obj_detection.detection:main',
             'prepare_camera = obj_detection.prepare_camera:main',
             'basket_camera = obj_detection.basket_camera:main',
-            'basket_camera_static_test = obj_detection.basket_camera_static_test:main',
+            'basket_camera_live_test = obj_detection.basket_camera_live_test:main',
         ],
     },
 )

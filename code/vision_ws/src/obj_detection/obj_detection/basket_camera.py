@@ -1,22 +1,25 @@
 """
 basket_camera.py
 =================
-바스켓 4개(B1~B4)를 내려다보도록 고정 설치된 두 번째 RealSense 카메라로
-각 바스켓에 사과가 있는지 없는지를 판단해서 `/basket_status` 토픽으로
-계속 알려주는 노드 (basket_camera_node).
+바스켓 4개(B1~B4)를 내려다보도록 고정 설치된 일반 USB 웹캠(예: 로지텍 C270,
+/dev/videoN)으로 각 바스켓에 사과가 있는지 없는지를 판단해서 `/basket_status`
+토픽으로 계속 알려주는 노드 (basket_detection_node).
 
-detection.py의 사과 1개 상태 판정(get_apple_status 서비스, ~1초 소요, depth
-검증 포함)과는 목적이 다르다 - 여기는 "바스켓 안에 뭐라도 있는지"만 빠르게,
-주기적으로 판단하면 되므로 depth 검증 없이 YOLO 컬러 프레임만 쓴다.
+픽 카메라(realsense.py/detection.py)는 depth까지 쓰는 RealSense라 ROS 토픽으로
+구독하지만, 이 카메라는 "바스켓 안에 뭐라도 있는지"만 컬러 프레임으로 빠르게
+판단하면 되므로 별도의 카메라 드라이버 노드 없이 cv2.VideoCapture로 이 노드
+안에서 직접 연다 (RealSense가 아닌 일반 V4L2 웹캠이라 realsense2_camera로
+publish할 수도 없음).
 
 파이프라인 (_publish_status 기준):
     1) YOLO(yolo.AppleStatusModel, obj_detection과 동일 체크포인트 재사용 -
        apple_normal/apple_rotten/apple_damaged/basket 클래스가 이미 다 있음)로
        현재 프레임의 모든 후보 박스를 가져온다.
-    2) label == "basket"인 박스만 추려서 좌상단 좌표(x1, y1) 오름차순으로
-       정렬한다 - 사용자 요구사항: "좌상단에 가까우면 b1, 그 다음 b2, b3,
-       가장 오른쪽이 b4" -> 화면 왼쪽부터 순서대로 b1..b4로 배정.
-       4개보다 적게 잡히면 잡힌 만큼만 채우고 valid=False로 표시한다.
+    2) label == "basket"인 박스만 추려서 좌상단 좌표(y1, x1) 오름차순으로
+       정렬한다 - 실제 카메라 구도상 바스켓 4개가 위에서 아래로 배치되므로
+       화면 맨 위가 b1, 맨 아래가 b4가 되도록 y(세로) 우선 정렬, 같은 높이면
+       x(가로)로 tie-break. 4개보다 적게 잡히면 잡힌 만큼만 채우고
+       valid=False로 표시한다.
     3) apple_normal/apple_rotten/apple_damaged 박스의 중심점이 어떤 바스켓
        bbox 안에 들어오면 그 바스켓을 occupied=True로 표시한다.
     4) {"b1":bool, "b2":bool, "b3":bool, "b4":bool, "valid":bool,
@@ -25,24 +28,23 @@ detection.py의 사과 1개 상태 판정(get_apple_status 서비스, ~1초 소�
        String+JSON 패턴을 그대로 따름 - 커스텀 topic msg를 새로 만들지 않음).
 
 카메라는 로봇 팔에 달린 게 아니라 바스켓 전체가 잘 보이는 곳에 고정
-설치되는 별도의 물리 RealSense이므로, prepare_camera.py처럼 로봇을 움직여
-포지셔닝할 필요가 없다. 토픽 네임스페이스만 obj_detection이 쓰는 기본
-카메라(/camera/camera/...)와 겹치지 않게 파라미터로 분리한다
-(기본값 /camera2/camera - basket_camera.launch.py가 실제 RealSense 노드를
-camera_name:=camera2로 띄우는 것과 짝을 맞춤).
+설치되는 별도의 물리 카메라이므로, prepare_camera.py처럼 로봇을 움직여
+포지셔닝할 필요가 없다. 어떤 /dev/videoN을 열지는 ROS 파라미터
+`device_index`로 지정한다 (`v4l2-ctl --list-devices`로 실제 장치/인덱스
+확인 - basket_camera_live_test.py의 --device_index와 동일한 값을 쓰면 됨).
 """
 
 import json
+import threading
 import time
 
 import cv2
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
-from obj_detection.ros_image_utils import imgmsg_to_cv2, cv2_to_imgmsg
+from obj_detection.ros_image_utils import cv2_to_imgmsg
 from obj_detection.yolo import AppleStatusModel
 
 # 바스켓 점유 판정을 몇 초마다 다시 계산해서 publish할지.
@@ -51,29 +53,60 @@ STATUS_PUBLISH_PERIOD_SEC = 0.5
 # 관리하는 바스켓 개수(B1~B4 고정).
 BASKET_NAMES = ["b1", "b2", "b3", "b4"]
 
+# 디버그 오버레이에 b1~b4와 함께 보여줄 표시 이름 (사용자 지정값).
+# /basket_status로 나가는 JSON 키(b1..b4)는 로봇/백엔드가 그대로 쓰고 있으므로
+# 여기서는 건드리지 않고, 디버그 오버레이 표시에만 쓴다.
+BASKET_DISPLAY_NAMES = {
+    "b1": "basket_a_s",
+    "b2": "basket_a_d",
+    "b3": "basket_a_n",
+    "b4": "basket_a_r",
+}
+
 APPLE_LABELS = {"apple_normal", "apple_rotten", "apple_damaged"}
 
 
-class BasketImgNode(Node):
-    """세컨 카메라(바스켓 조망용) 컬러 프레임만 구독하는 노드.
+class WebcamCapture:
+    """일반 V4L2 웹캠을 백그라운드 스레드에서 계속 읽어 최신 프레임만 들고 있는 헬퍼.
 
-    바스켓 점유 판단은 YOLO bbox 포함관계만으로 충분해서 depth는 구독하지
-    않는다 (realsense.py의 ImgNode와 달리 depth/camera_info 불필요)."""
+    realsense.py의 ImgNode(콜백 기반 구독)와 달리 cv2.VideoCapture는 자체적으로
+    스트림을 안 밀어주고 read()를 호출해야 하므로, 이 스레드가 계속 read()를
+    돌며 최신 프레임을 갱신해둔다 - 그래야 _publish_status 타이머가 항상 최신
+    프레임을 즉시 가져다 쓸 수 있다(느린 read()가 타이머 콜백을 막지 않음)."""
 
-    def __init__(self, topic_prefix: str):
-        super().__init__('basket_img_node')
-        self.color_frame = None
-        self.color_subscription = self.create_subscription(
-            Image, f'{topic_prefix}/color/image_raw', self.color_callback, 10)
-        self.get_logger().info(
-            f"Waiting for basket camera topic: {topic_prefix}/color/image_raw"
-        )
+    def __init__(self, device_index: int, logger):
+        self.cap = cv2.VideoCapture(device_index)
+        if not self.cap.isOpened():
+            raise RuntimeError(
+                f"/dev/video{device_index}를 열 수 없습니다. "
+                "'v4l2-ctl --list-devices'로 장치/인덱스를 확인하세요."
+            )
+        self._logger = logger
+        self._frame = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+        self._logger.info(f"웹캠 오픈 완료: /dev/video{device_index}")
 
-    def color_callback(self, msg):
-        self.color_frame = imgmsg_to_cv2(msg, desired_encoding='bgr8')
+    def _capture_loop(self):
+        while not self._stop_event.is_set():
+            ok, frame = self.cap.read()
+            if not ok:
+                self._logger.warn("웹캠 프레임 읽기 실패 - 재시도")
+                time.sleep(0.1)
+                continue
+            with self._lock:
+                self._frame = frame
 
     def get_color_frame(self):
-        return self.color_frame
+        with self._lock:
+            return self._frame
+
+    def stop(self):
+        self._stop_event.set()
+        self._thread.join(timeout=1.0)
+        self.cap.release()
 
 
 def _box_center(box):
@@ -87,15 +120,15 @@ def _point_in_box(px, py, box):
 
 
 def assign_baskets(detections):
-    """YOLO 전체 후보 목록에서 basket 박스만 골라 좌상단(x1,y1) 오름차순으로
-    정렬한 뒤 b1..b4에 순서대로 배정한다.
+    """YOLO 전체 후보 목록에서 basket 박스만 골라 좌상단(y1,x1) 오름차순으로
+    정렬한 뒤 b1..b4에 순서대로 배정한다 (화면 맨 위=b1 ... 맨 아래=b4).
 
     반환값: {"b1": box_or_None, "b2": ..., "b3": ..., "b4": ...}, 그리고
     실제로 4개가 다 잡혔는지(valid) 여부.
     """
     basket_boxes = sorted(
         (box for label, _score, box in detections if label == "basket"),
-        key=lambda box: (box[0], box[1]),
+        key=lambda box: (box[1], box[0]),
     )
     assignment = {name: None for name in BASKET_NAMES}
     for name, box in zip(BASKET_NAMES, basket_boxes):
@@ -123,8 +156,8 @@ def compute_occupancy(detections, basket_assignment):
 def draw_basket_overlay(frame, basket_assignment, occupancy):
     """바스켓 bbox + b1~b4 라벨 + 점유 여부를 그린 프레임을 반환 (원본은 건드리지 않음).
 
-    ROS 노드(_publish_debug_image)와 ROS 없이 정지 이미지로 로직만 확인하는
-    basket_camera_static_test.py가 동일한 시각화를 공유하기 위해 분리했다.
+    BasketDetectionNode(_publish_status)와 ROS 없이 실시간으로 로직만 확인하는
+    basket_camera_live_test.py가 동일한 시각화를 공유하기 위해 분리했다.
     """
     annotated = frame.copy()
     for name, box in basket_assignment.items():
@@ -133,7 +166,8 @@ def draw_basket_overlay(frame, basket_assignment, occupancy):
         x1, y1, x2, y2 = [int(round(v)) for v in box]
         color = (0, 0, 255) if occupancy[name] else (0, 255, 0)
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-        label = f"{name} {'APPLE' if occupancy[name] else 'EMPTY'}"
+        display_name = BASKET_DISPLAY_NAMES.get(name, name)
+        label = f"{name}({display_name}) {'APPLE' if occupancy[name] else 'EMPTY'}"
         cv2.putText(
             annotated, label, (x1, max(0, y1 - 8)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
@@ -147,10 +181,10 @@ class BasketDetectionNode(Node):
     def __init__(self):
         super().__init__('basket_detection_node')
 
-        self.declare_parameter('camera_topic_prefix', '/camera2/camera')
-        topic_prefix = self.get_parameter('camera_topic_prefix').get_parameter_value().string_value
+        self.declare_parameter('device_index', 0)
+        device_index = self.get_parameter('device_index').get_parameter_value().integer_value
 
-        self.img_node = BasketImgNode(topic_prefix)
+        self.webcam = WebcamCapture(device_index, self.get_logger())
         self.model = AppleStatusModel()
 
         self.status_pub = self.create_publisher(String, 'basket_status', 10)
@@ -159,11 +193,11 @@ class BasketDetectionNode(Node):
         self.create_timer(STATUS_PUBLISH_PERIOD_SEC, self._publish_status)
 
         self.get_logger().info(
-            f"BasketDetectionNode initialized (camera_topic_prefix={topic_prefix})"
+            f"BasketDetectionNode initialized (device_index={device_index})"
         )
 
     def _publish_status(self):
-        frame = self.img_node.get_color_frame()
+        frame = self.webcam.get_color_frame()
         if frame is None:
             return
 
@@ -189,14 +223,10 @@ class BasketDetectionNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = BasketDetectionNode()
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
-    executor.add_node(node.img_node)
     try:
-        executor.spin()
+        rclpy.spin(node)
     finally:
-        executor.shutdown()
-        node.img_node.destroy_node()
+        node.webcam.stop()
         node.destroy_node()
         rclpy.shutdown()
 
