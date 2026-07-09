@@ -14,7 +14,18 @@ from apple_care_robot.safe_motion import raise_if_emergency_stop, make_hw_safety
 
 DOWN_SPEED_VEL = 30        # 내려가는 속도 (mm/s)
 DOWN_SPEED_ACC = 20        # 가속도
-MAX_DOWN_DISTANCE = 150    # 접촉을 못 찾았을 때 최대 몇 mm까지 내려갈지 (안전 마진 확보)
+
+# 접촉을 못 찾았을 때 최대 몇 mm까지 내려갈지 (안전 마진 확보).
+#
+# 이 거리는 호출부가 넘기는 current_pos(하강 시작점) 기준이라, 시작점을 실제
+# 접촉면(예: box_pos)보다 높게 잡는 호출부(box_sequence_test.py의
+# PLACE_FORCE_START_CLEARANCE_MM)가 있으면 그만큼 "접촉면 기준 실제 탐색 가능
+# 깊이"가 줄어듦 - 예: 시작점을 30mm 올리고 이 값을 그대로 150mm로 두면
+# 접촉면 아래로는 120mm밖에 못 내려가 봄. PLACE_FORCE_START_CLEARANCE_MM을
+# 15mm로 낮추면서, 그만큼(15mm) 여기도 같이 늘려서 접촉면 기준 탐색 깊이를
+# 원래 150mm로 복원함(150 -> 165). TIMEOUT_SEC은 이 값에서 자동 계산되므로
+# 늘어난 거리만큼 시간 여유도 같이 늘어남.
+MAX_DOWN_DISTANCE = 165
 FORCE_THRESHOLD = 4        # 힘 변화량 임계값 (N) - 필요시 8~15 사이로 튜닝
 
 # 타임아웃은 항상 "최대 하강 시간"보다 여유 있게 잡아야 함.

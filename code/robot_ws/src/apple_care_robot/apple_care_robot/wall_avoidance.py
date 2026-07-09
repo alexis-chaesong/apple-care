@@ -36,6 +36,21 @@ Tray Wall Avoidance
     실제 로봇에서 처음 테스트할 때 기울어지는 방향(벽 쪽 vs 트레이 중심 쪽)을
     반드시 눈으로 확인할 것. 반대로 기울면 WALL_APPROACH_TILT_DEG 값의 부호만
     뒤집으면 됨.
+
+    실측으로 확인된 문제: DEFAULT_PICK_ORIENTATION의 ry(-174.74)가 ZYZ 오일러
+    특이점(ry=180)에 아주 가까워서, 벽마다 다르게 계산한 회전을 다시 (rx,ry,rz)로
+    분해할 때 scipy가 원래 자세와 동떨어진 표현(rx/rz가 100~200도씩 튐)을 고르는
+    경우가 있었음 - 이 경우 실제 로봇은 명령받은 각도에 정확히 도달하지 못하고
+    벽 방향과 무관하게 항상 비슷한 쪽으로 기울어 보이는 문제가 있었음.
+    _nearest_zyz_branch()로 원래 자세에 가까운 branch를 고르도록 고쳐서 해결함.
+
+    실측으로 확인된 문제 (2): 위 특이점 문제를 고친 뒤에도, 실기 사진으로 확인한
+    결과 왼쪽/오른쪽 벽에서 그리퍼가 기울어지는 방향이 서로 반대로(의도와 정반대로)
+    나타남. 원인은 회전축 부호(ey, -ex, 0)가 "그리퍼가 접근하는 방향(팁->손목
+    반대쪽) 벡터"를 트레이 중심 쪽으로 기울이도록 잡혀 있었던 것 - pick_pos(사과
+    위치, 그립 지점)는 고정된 채로 이 벡터만 회전하므로, 실제로는 손목/몸통이
+    벽 쪽으로 더 쏠리는 반대 결과가 됨. 축 부호를 (-ey, ex, 0)으로 뒤집어서
+    손목/몸통이 벽 반대쪽(트레이 중심)으로 빠지도록 고침.
 """
 
 import numpy as np
@@ -51,7 +66,15 @@ TRAY_Y_MIN_MM = -158.69
 TRAY_Y_MAX_MM = 116.98
 
 # pick_pos가 트레이 벽으로부터 이 거리(mm) 안이면 "벽 근처"로 보고 대각선 접근을 적용.
-WALL_PROXIMITY_MARGIN_MM = 40.0
+#
+# 실측으로 확인된 문제: 회전 방향 자체는 좌/우/전면/후면/모서리 전부 수학적으로
+# 대칭이고 올바르게 계산되는데도(_tilt_orientation 참고), 실기 사진상 전면 벽
+# 근처에서는 대각선 오프셋이 거의 안 걸린 것처럼 보이는 사례가 있었음 - 비전이
+# 준 pick 좌표가 실제 벽까지의 거리보다 약간 더 크게(예: 40~50mm) 나오는 오차가
+# 있으면, 이 판정 자체가 "벽 근처 아님"으로 걸러져서 티트/오프셋이 아예 적용
+# 안 됨. 40mm는 오차 여유가 거의 없어서, 여유를 좀 더 두어 비전/실측 오차가
+# 있어도 확실히 걸리도록 늘림.
+WALL_PROXIMITY_MARGIN_MM = 45.0
 
 # 벽 근처 접근 시 수직에서 트레이 중심 방향으로 기울이는 각도(도).
 WALL_APPROACH_TILT_DEG = 15.0
@@ -74,7 +97,14 @@ CORNER_APPROACH_HOVER_CLEARANCE_MM = 50.0
 # ABSOLUTE_SMALL_DIAMETER_MM/2=30mm)보다 충분히 작은 값만큼 트레이 중심 쪽으로
 # 최종 grasp 지점도 같이 당겨서, 사과를 놓치지 않는 선에서 여유를 더 번다.
 # 벽 하나만 가까운 경우는 기존처럼 pick_pos를 건드리지 않는다(그동안 문제 없었음).
-CORNER_PICK_INSET_MM = 10.0
+#
+# 실측으로 확인된 문제: 10mm를 당기면 hover->pick 대각선 접근/tilt 방향과 겹쳐서
+# 그립이 사과 중심이 아니라 살짝 가장자리를 잡게 되고, 떨어뜨릴 위험이 있었음.
+# 모서리 접근 자체(hover 경유점, tilt)는 이미 벽 회피에 충분한 여유를 주고
+# 있으므로, 마지막 grasp 지점은 원래 사과 중심에 더 가깝게 당겨서 파지 안정성을
+# 우선함 - 그만큼 벽과의 여유는 약간 줄어들지만, hover 단계에서 이미 충분히
+# 우회했으므로 실측상 문제 없었음.
+CORNER_PICK_INSET_MM = 5.0
 
 
 def is_within_tray_bounds(x, y) -> bool:
@@ -92,12 +122,22 @@ def is_within_tray_bounds(x, y) -> bool:
     return TRAY_X_MIN_MM <= x <= TRAY_X_MAX_MM and TRAY_Y_MIN_MM <= y <= TRAY_Y_MAX_MM
 
 
+# "상단(후면)" 벽(y_max) 하나에만 가까운 경우(모서리 아님)는 실측 결과 다른 세 벽과
+# 달리 그리퍼를 기울이면 안 됨 - 이 벽 쪽에는 사과가 여러 개 나란히 놓이는 경우가
+# 많아서, tilt 때문에 옆으로 빠지는 hover 경로가 바로 옆 사과와 부딪힐 위험이 있음.
+# 그래서 이 벽만 "직선 접근"(기울이지 않고, hover 위치만 트레이 중심 쪽/위로 살짝
+# 띄움)으로 예외 처리함. 모서리(다른 벽과 동시에 가까움)는 기존처럼 기울임 -
+# 그 경우는 이미 실측으로 문제없이 확인됨.
+STRAIGHT_APPROACH_WALLS = frozenset({"y_max"})
+
+
 def _nearest_wall_escape_dir(x, y):
     """
     (x, y)가 트레이 경계 중 어느 벽에라도 WALL_PROXIMITY_MARGIN_MM 이내로
     가까우면, 그 벽에서 트레이 중심 쪽으로 벗어나는 정규화된 방향(ex, ey)과
-    "모서리(두 벽에 동시에 가까움)인지" 여부를 반환. 모서리면 두 방향을 합성해
-    대각선 방향으로 줌. 벽 근처가 아니면 (None, None, False).
+    "모서리(두 벽에 동시에 가까움)인지" 여부, 가까운 벽 이름들의 집합을 반환.
+    모서리면 두 방향을 합성해 대각선 방향으로 줌. 벽 근처가 아니면
+    (None, None, False, frozenset()).
 
     이 함수는 (x, y)가 트레이 범위 "안"(is_within_tray_bounds)이라는 전제 하에
     호출돼야 함 - 범위를 이미 벗어난 좌표(예: x > TRAY_X_MAX_MM)를 넣으면 해당
@@ -117,20 +157,49 @@ def _nearest_wall_escape_dir(x, y):
     }
 
     close = [
-        (dist, direction) for dist, direction in margins.values()
+        (name, dist, direction) for name, (dist, direction) in margins.items()
         if 0 <= dist <= WALL_PROXIMITY_MARGIN_MM
     ]
     if not close:
-        return None, None, False
+        return None, None, False, frozenset()
 
+    close_walls = frozenset(name for name, _, _ in close)
     is_corner = len(close) >= 2
-    min_dist = min(dist for dist, _ in close)
-    ex = sum(d[0] for _, d in close)
-    ey = sum(d[1] for _, d in close)
+    min_dist = min(dist for _, dist, _ in close)
+    ex = sum(d[0] for _, _, d in close)
+    ey = sum(d[1] for _, _, d in close)
     norm = (ex ** 2 + ey ** 2) ** 0.5
     if norm < 1e-6:
-        return min_dist, None, is_corner
-    return min_dist, (ex / norm, ey / norm), is_corner
+        return min_dist, None, is_corner, close_walls
+    return min_dist, (ex / norm, ey / norm), is_corner, close_walls
+
+
+def _wrap_deg(angle_deg):
+    """각도를 (-180, 180] 범위로 정규화."""
+    return (angle_deg + 180.0) % 360.0 - 180.0
+
+
+def _nearest_zyz_branch(candidate, reference):
+    """
+    ZYZ 오일러(proper Euler, 축 반복)는 같은 회전을 나타내는 두 가지 표현이
+    있음: (rx,ry,rz)와 (rx+180,-ry,rz+180)(mod 360)는 동일한 회전.
+
+    DEFAULT_PICK_ORIENTATION의 ry(-174.74)가 ZYZ 특이점(ry=180)에 아주 가까워서,
+    scipy의 as_euler()가 두 표현 중 reference(원래 자세)와 동떨어진 쪽을 골라주는
+    경우가 있었음 - 실측 결과 이 경우 rx/rz가 100~200도씩 튀어서, 벽 방향에 따라
+    의도한 만큼만 기울여야 할 자세가 실제로는 큰 폭으로 달라진 손목 자세로
+    지시되고, 그 결과 로봇이 명령받은 각도에 정확히 도달하지 못하고 매번 비슷한
+    방향으로 수렴하는 문제(모든 벽에서 같은 방향/각도로 기울어 보이는 문제)로
+    이어졌음. reference(기존 자세)에 더 가까운 쪽 branch를 골라서, 최소한의
+    관절 이동만으로 목표 자세에 도달하게 하여 이 문제를 없앤다.
+    """
+    rx, ry, rz = candidate
+    alt = (_wrap_deg(rx + 180.0), -ry, _wrap_deg(rz + 180.0))
+
+    def _cost(cand):
+        return sum(abs(_wrap_deg(c - r)) for c, r in zip(cand, reference))
+
+    return candidate if _cost(candidate) <= _cost(alt) else alt
 
 
 def _tilt_orientation(base_orientation, escape_dir_xy, tilt_deg):
@@ -139,12 +208,19 @@ def _tilt_orientation(base_orientation, escape_dir_xy, tilt_deg):
     escape_dir_xy(베이스 좌표계 XY 평면, 벽 반대/트레이 중심 방향) 쪽으로
     tilt_deg만큼 기울인 새 (rx,ry,rz)를 반환.
 
-    회전축을 escape_dir_xy와 수직인 수평축(ey, -ex, 0)으로 잡고, 베이스(월드)
+    회전축을 escape_dir_xy와 수직인 수평축(-ey, ex, 0)으로 잡고, 베이스(월드)
     좌표계 기준으로 base_orientation 앞에 이 회전을 곱함 - 그래야 그리퍼가
     "제자리에서 자기 축 기준"이 아니라 "트레이 중심을 향해" 기울어짐.
+
+    실측으로 확인된 문제: 축을 (ey, -ex, 0)으로 두면(이전 구현), pick_pos(사과
+    위치, 고정)를 기준으로 회전시키기 때문에 "그리퍼가 접근하는 방향(팁->손목
+    반대쪽) 벡터"가 트레이 중심 쪽으로 기우는 대신, 실제로는 손목/몸통 쪽이
+    벽 쪽으로 더 쏠리는 반대 결과가 나옴(왼쪽 벽에서 오른쪽 벽에서와 반대로
+    동작하는 것처럼 보였음). 축 부호를 (-ey, ex, 0)으로 뒤집어서 손목/몸통이
+    벽 반대쪽(트레이 중심)으로 빠지도록 고침.
     """
     ex, ey = escape_dir_xy
-    axis = np.array([ey, -ex, 0.0])
+    axis = np.array([-ey, ex, 0.0])
     axis_norm = np.linalg.norm(axis)
     if axis_norm < 1e-6:
         return base_orientation
@@ -152,7 +228,8 @@ def _tilt_orientation(base_orientation, escape_dir_xy, tilt_deg):
 
     r_base = Rotation.from_euler("ZYZ", base_orientation, degrees=True)
     r_tilt = Rotation.from_rotvec(np.radians(tilt_deg) * axis)
-    new_rx, new_ry, new_rz = (r_tilt * r_base).as_euler("ZYZ", degrees=True)
+    raw = tuple(float(v) for v in (r_tilt * r_base).as_euler("ZYZ", degrees=True))
+    new_rx, new_ry, new_rz = _nearest_zyz_branch(raw, base_orientation)
     return (float(new_rx), float(new_ry), float(new_rz))
 
 
@@ -172,7 +249,7 @@ def compute_wall_aware_approach(pick_pos, posx_factory):
         (hover_pos 또는 None, 실제로 movel할 최종 pick_pos)
     """
     x, y, z, rx, ry, rz = pick_pos
-    _, escape_dir, is_corner = _nearest_wall_escape_dir(x, y)
+    _, escape_dir, is_corner, close_walls = _nearest_wall_escape_dir(x, y)
     if escape_dir is None:
         return None, pick_pos
 
@@ -184,6 +261,12 @@ def compute_wall_aware_approach(pick_pos, posx_factory):
         CORNER_APPROACH_HOVER_CLEARANCE_MM if is_corner else WALL_APPROACH_HOVER_CLEARANCE_MM
     )
     pick_inset_mm = CORNER_PICK_INSET_MM if is_corner else 0.0
+
+    # 상단(y_max) 벽 하나에만 가까운 경우는 기울이지 않고 "직선 접근"으로 예외
+    # 처리 - STRAIGHT_APPROACH_WALLS 정의 참고 (여러 사과가 나란히 놓이는 벽이라
+    # tilt로 인한 옆 이동이 이웃 사과와 부딪힐 위험이 있음). 모서리는 제외(그대로 기울임).
+    if not is_corner and close_walls <= STRAIGHT_APPROACH_WALLS:
+        tilt_deg = 0.0
 
     ex, ey = escape_dir
     new_rx, new_ry, new_rz = _tilt_orientation((rx, ry, rz), escape_dir, tilt_deg)

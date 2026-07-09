@@ -27,7 +27,10 @@ websockets>=12.0
 # broadcast() 함수를 통해 로봇의 실시간 상태 좌표나 에러 코드를 단 1밀리초의 지연도 없이 실시간으로 밀어내기(Push) 할 수 있도록 통신 통로를 깔끔하게 뚫어줌 
 sounddevice
 soundfile
-numpy
+# numpy는 2.x가 아닌 1.x로 고정 - ROS2 Humble의 cv_bridge(/opt/ros/humble)가 시스템
+# numpy 1.21 ABI로 컴파일되어 있어서, pip로 numpy 2.x가 깔리면 robot_bridge.py의
+# `from cv_bridge import CvBridge`에서 AttributeError: _ARRAY_API not found로 죽음.
+numpy<2
 
 openai>=1.40.0
 # services/llm_service.py의 AsyncOpenAI, stt_tts/stt_service.py의 Whisper 변환,
