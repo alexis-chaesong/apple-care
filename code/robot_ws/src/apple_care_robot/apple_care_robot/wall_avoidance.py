@@ -19,9 +19,9 @@ Tray Wall Avoidance
 모서리(두 벽에 동시에 가까움)는 벽 하나만 가까운 경우보다 공간이 훨씬 좁아서,
 실측 결과 벽 하나 기준으로 튜닝한 tilt/offset 그대로는 그리퍼가 여전히 벽에
 스치는 문제가 있었다. 그래서 모서리는 CORNER_APPROACH_* 값(더 큰 tilt/offset)을
-따로 쓰고, 최종 grasp 지점(pick_pos)도 CORNER_PICK_INSET_MM만큼 트레이 중심
-쪽으로 같이 당겨서 마지막 하강 지점의 여유도 확보한다 (벽 하나만 가까운 경우는
-기존처럼 pick_pos를 그대로 둠).
+따로 쓰고, 최종 grasp 지점(pick_pos)도 기울인 뒤의 실제 툴 자세 기준 -Y축
+방향으로 CORNER_PICK_INSET_MM만큼 TCP를 이동시켜서 마지막 하강 지점의 여유를
+조정한다 (벽 하나만 가까운 경우는 기존처럼 pick_pos를 그대로 둠).
 
 주의 - 트레이 경계값 관련:
     TRAY_X_MIN_MM/TRAY_X_MAX_MM/TRAY_Y_MIN_MM/TRAY_Y_MAX_MM은 실제 작업대
@@ -91,19 +91,13 @@ CORNER_APPROACH_TILT_DEG = 22.0
 CORNER_APPROACH_LATERAL_OFFSET_MM = 45.0
 CORNER_APPROACH_HOVER_CLEARANCE_MM = 50.0
 
-# 모서리에서는 hover 경유점만 우회시키고 최종 pick_pos(x,y)는 원래 사과 위치 그대로
+# 모서리에서는 hover 경유점만 우회시키고 최종 pick_pos는 원래 사과 위치 그대로
 # 두면, 마지막 하강 구간에서 결국 다시 두 벽에 바짝 붙은 지점까지 내려가야 해서
-# 그립 순간 손가락이 스칠 수 있다. 사과 자체 반지름(가장 작은 apple_small 기준
-# ABSOLUTE_SMALL_DIAMETER_MM/2=30mm)보다 충분히 작은 값만큼 트레이 중심 쪽으로
-# 최종 grasp 지점도 같이 당겨서, 사과를 놓치지 않는 선에서 여유를 더 번다.
-# 벽 하나만 가까운 경우는 기존처럼 pick_pos를 건드리지 않는다(그동안 문제 없었음).
-#
-# 실측으로 확인된 문제: 10mm를 당기면 hover->pick 대각선 접근/tilt 방향과 겹쳐서
-# 그립이 사과 중심이 아니라 살짝 가장자리를 잡게 되고, 떨어뜨릴 위험이 있었음.
-# 모서리 접근 자체(hover 경유점, tilt)는 이미 벽 회피에 충분한 여유를 주고
-# 있으므로, 마지막 grasp 지점은 원래 사과 중심에 더 가깝게 당겨서 파지 안정성을
-# 우선함 - 그만큼 벽과의 여유는 약간 줄어들지만, hover 단계에서 이미 충분히
-# 우회했으므로 실측상 문제 없었음.
+# 그립 순간 손가락이 스칠 수 있다. hover 단계에서 이미 충분히 우회했으므로,
+# 최종 grasp 지점은 기울인 뒤의 실제 툴 자세 기준 -Y축 방향으로 이 값(mm)만큼
+# TCP를 더 이동시켜서 여유를 조정한다 (베이스 프레임 escape_dir이 아니라 툴
+# -Y축 기준 - compute_wall_aware_approach 참고). 벽 하나만 가까운 경우는
+# 기존처럼 pick_pos를 건드리지 않는다(그동안 문제 없었음).
 CORNER_PICK_INSET_MM = 5.0
 
 
@@ -275,9 +269,17 @@ def compute_wall_aware_approach(pick_pos, posx_factory):
     hover_y = y + ey * lateral_offset_mm
     hover_z = z + hover_clearance_mm
 
-    pick_x = x + ex * pick_inset_mm
-    pick_y = y + ey * pick_inset_mm
+    # 최종 grasp 지점(pick_inset)은 베이스 프레임 escape_dir이 아니라, 기울인 뒤의
+    # 실제 툴 자세(new_rx,new_ry,new_rz) 기준 -Y축 방향으로 pick_inset_mm만큼
+    # 이동시킨다 - 즉 "TCP를 툴좌표 -Y로 N mm"라는 요구사항을 그대로 반영함
+    # (+Y가 아니라 -Y이므로 벽 쪽으로 더 다가가는 방향).
+    tool_y = Rotation.from_euler(
+        "ZYZ", (new_rx, new_ry, new_rz), degrees=True
+    ).as_matrix()[:, 1]
+    pick_x = x - tool_y[0] * pick_inset_mm
+    pick_y = y - tool_y[1] * pick_inset_mm
+    pick_z = z - tool_y[2] * pick_inset_mm
 
     hover_pos = posx_factory(hover_x, hover_y, hover_z, new_rx, new_ry, new_rz)
-    tilted_pick_pos = posx_factory(pick_x, pick_y, z, new_rx, new_ry, new_rz)
+    tilted_pick_pos = posx_factory(pick_x, pick_y, pick_z, new_rx, new_ry, new_rz)
     return hover_pos, tilted_pick_pos

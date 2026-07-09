@@ -52,7 +52,7 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 import DR_init
 from std_msgs.msg import String
-from apple_care_msgs.srv import SrvAppleStatus
+from apple_care_msgs.srv import SrvAppleStatus, SrvBasketStatus
 from apple_care_robot.openclose import gripper_open
 from apple_care_robot.pick_helpers import (
     pick_apple, _depth_offset_for_condition, DEFAULT_PICK_ORIENTATION,
@@ -82,8 +82,9 @@ TOPIC_ROBOT_COMMAND = "/robot/command"
 # (pick_and_place_voice/robot_control.py의 "/get_3d_position"과 동일한 이유).
 VISION_SERVICE_NAME = "/get_apple_status"
 
-# decision.pose가 None으로 온 경우(비전이 좌표를 못 준 경우)에 쓰는 임시 pick 좌표.
-FALLBACK_PICK_POS_XYZ = (492.0, 13.48, 23.39)
+# backend/basket_bridge.py가 네임스페이스 없이 여는 실제 서비스(get_basket_status)를
+# 찾기 위해 VISION_SERVICE_NAME과 동일한 이유로 절대 이름을 씀.
+BASKET_SERVICE_NAME = "/get_basket_status"
 
 # 그립 자체가 실패하는 경우(사과를 놓침 - grasp_apple_with_force_feedback이
 # picked_ok=False)를 대비한 재시도 횟수. 매번 CAMERA로 돌아가서 위치를 다시
@@ -111,6 +112,13 @@ MAX_PICK_ATTEMPTS = 3
 # 그 뒤 박스 배치 튜닝(30 -> 15 -> 10)이 의도치 않게 작업대 재배치에도 같이
 # 적용돼버렸던 문제가 있어서 분리함.
 PLACE_FORCE_START_CLEARANCE_MM = 10
+
+# 바스켓에 이미 사과가 있으면(get_basket_status로 조회) 그 위에서 접촉을
+# 감지해야 하므로, 빈 바스켓 기준(10mm)보다 시작 높이 여유를 더 둔다. 아직
+# 실기 튜닝 전 새 기능이라, WORKTABLE_FORCE_START_CLEARANCE_MM(작업대 재배치 -
+# 역시 "바닥이 아니라 뭔가 위에 착지"하는 동일한 상황)과 같은 값을 초깃값으로
+# 사용함 - 실기 테스트 후 조정할 것.
+PLACE_FORCE_START_CLEARANCE_MM_OCCUPIED = 30
 
 # place_apple_back_on_worktable 전용 힘제어 시작 높이 클리어런스(mm). 박스 배치와
 # 달리 아직 실기로 튜닝된 적 없는 새 기능이라, PLACE_FORCE_START_CLEARANCE_MM의
@@ -339,6 +347,26 @@ def main(args=None):
     while not vision_client.wait_for_service(timeout_sec=3.0):
         node.get_logger().info(f"Waiting for {VISION_SERVICE_NAME} service...")
 
+    # vision_client와 달리 시작을 블록하지 않음: 이 서비스는 backend 프로세스
+    # (basket_bridge.py)가 떠 있어야 응답 가능한데, 안 떠 있어도 로봇 사이클은
+    # "빈 바스켓" 기본값으로 계속 동작해야 하기 때문 (is_basket_occupied 참고).
+    basket_client = node.create_client(SrvBasketStatus, BASKET_SERVICE_NAME)
+
+    def is_basket_occupied(box_name: str) -> bool:
+        """box_name(b1..b4)의 최신 점유 상태를 get_basket_status로 조회.
+
+        서비스가 아직 준비 안 됐거나(backend 미기동) 응답이 valid=False(아직
+        /basket_status를 한 번도 못 받은 상태)면 '비어있음'으로 간주한다 -
+        기본 동작(기존과 동일한 빈 바스켓 로직)으로 안전하게 폴백하기 위함."""
+        if not basket_client.service_is_ready():
+            return False
+        future = basket_client.call_async(SrvBasketStatus.Request())
+        rclpy.spin_until_future_complete(node, future, timeout_sec=1.0)
+        response = future.result()
+        if response is None or not response.valid:
+            return False
+        return getattr(response, f"{box_name}_occupied", False)
+
     def refresh_pick_pos(condition):
         """
         그립 실패 후 재시도 직전에 호출. CAMERA 위치에 서 있는 상태에서
@@ -433,9 +461,13 @@ def main(args=None):
         놓는 사이클 (집기 자체는 여기서 하지 않음).
         홈(안전 경유) -> 웨이포인트 -> box_pos로 이동 -> 힘제어 하강 ->
         그리퍼 오픈 -> 퇴피 -> 웨이포인트 -> 카메라 복귀.
-        박스 안에 이미 뭔가 있는지는 비전으로 확인하지 않고, 항상 동일하게
-        box_pos까지 이동한 뒤 힘제어(force_controlled_place)로 접촉을 감지하며
-        내려감 - 그래서 이미 사과가 있어도 접촉 시점에 멈추므로 안전함.
+        박스 안에 이미 뭔가 있는지는 get_basket_status로 미리 조회해서, 있으면
+        힘제어 시작 높이(clearance)를 더 높게 잡는다(PLACE_FORCE_START_CLEARANCE_MM_OCCUPIED) -
+        어차피 힘제어(force_controlled_place)가 접촉을 감지하며 내려가므로 이미
+        사과가 있어도 접촉 시점에 멈추긴 하지만, 시작 높이가 실제 내용물에 맞게
+        조정되어야 접촉 감지 여유가 안정적으로 확보됨. 조회 실패/backend 미기동
+        시에는 항상 "비어있음"으로 간주해 기존과 동일하게 동작한다
+        (is_basket_occupied 참고).
 
         접촉 감지 자체가 실패한 경우(박스에 못 놓은 경우)는 그립을 유지한 채로
         복귀하지 않고, place_apple_back_on_worktable(pick_pos)로 원래 집었던
@@ -452,10 +484,17 @@ def main(args=None):
         do_safe_movel(way_pos)
         wait(0.3)
 
-        node.get_logger().info(f"Move to {name} (힘제어 시작 높이: box_pos + {PLACE_FORCE_START_CLEARANCE_MM}mm)")
+        occupied = is_basket_occupied(name)
+        clearance = (
+            PLACE_FORCE_START_CLEARANCE_MM_OCCUPIED if occupied else PLACE_FORCE_START_CLEARANCE_MM
+        )
+        node.get_logger().info(
+            f"{name} 바스켓 상태: {'사과 있음' if occupied else '비어있음(기본)'} "
+            f"(힘제어 시작 높이: box_pos + {clearance}mm)"
+        )
         box_x, box_y, box_z, box_rx, box_ry, box_rz = box_pos
         force_start_pos = posx(
-            box_x, box_y, box_z + PLACE_FORCE_START_CLEARANCE_MM, box_rx, box_ry, box_rz
+            box_x, box_y, box_z + clearance, box_rx, box_ry, box_rz
         )
         do_safe_movel(force_start_pos)
         wait(0.3)
@@ -600,19 +639,22 @@ def main(args=None):
         # 내려가면 트레이/받침대와 충돌할 수 있으므로 condition별 전용 오프셋을 씀.
         depth_offset = _depth_offset_for_condition(condition)
 
-        if pose:
-            # pose는 카메라 좌표계 -> 로봇이 현재 서 있는(=CAMERA에서 감지된
-            # 순간의) pose를 기준으로 로봇 베이스 좌표계로 변환해야 movel에 그대로
-            # 쓸 수 있음. 자세한 설명은 vision_transform.py 상단 docstring 참고.
-            camera_pose_at_detection = get_current_posx()[0]
-            bx, by, bz = camera_to_base(pose, camera_pose_at_detection, depth_offset_mm=depth_offset)
-            node.get_logger().info(
-                f"Vision 좌표 변환: camera={pose} -> base=({bx:.2f}, {by:.2f}, {bz:.2f})"
+        if not pose:
+            node.get_logger().error(
+                f"decision.pose가 없어({fruit}) 위치를 알 수 없으므로 이 사과는 건너뜁니다."
             )
-            pick_pos = posx(bx, by, bz, *DEFAULT_PICK_ORIENTATION)
-        else:
-            node.get_logger().warn("decision.pose가 없어 임시 pick 좌표를 사용합니다.")
-            pick_pos = posx(*FALLBACK_PICK_POS_XYZ, *DEFAULT_PICK_ORIENTATION)
+            status_bus.publish_safety("ERR_PICK", f"{fruit} pose 없음")
+            continue
+
+        # pose는 카메라 좌표계 -> 로봇이 현재 서 있는(=CAMERA에서 감지된
+        # 순간의) pose를 기준으로 로봇 베이스 좌표계로 변환해야 movel에 그대로
+        # 쓸 수 있음. 자세한 설명은 vision_transform.py 상단 docstring 참고.
+        camera_pose_at_detection = get_current_posx()[0]
+        bx, by, bz = camera_to_base(pose, camera_pose_at_detection, depth_offset_mm=depth_offset)
+        node.get_logger().info(
+            f"Vision 좌표 변환: camera={pose} -> base=({bx:.2f}, {by:.2f}, {bz:.2f})"
+        )
+        pick_pos = posx(bx, by, bz, *DEFAULT_PICK_ORIENTATION)
 
         # 실측으로 확인된 문제: vision이 트레이 작업 영역을 한참 벗어난 위치를
         # 줄 때가 있는데(오탐/depth 오차), wall_avoidance.py의 벽-근접 판정이
