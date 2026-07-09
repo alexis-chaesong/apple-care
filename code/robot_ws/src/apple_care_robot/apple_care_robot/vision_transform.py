@@ -23,7 +23,7 @@ T_gripper2camera.npy에 저장돼 있음).
 
 주의:
     robot_posx는 반드시 "카메라가 그 물체를 봤을 때"의 로봇 pose여야 한다.
-    apple_sorting_cycle.py에서는 로봇이 CAMERA 위치에 서 있는 동안 vision이
+    box_sequence_test.py에서는 로봇이 CAMERA 위치에 서 있는 동안 vision이
     감지 -> 백엔드가 판정 -> /decision/result로 pose가 내려오는 구조라서,
     decision을 받은 시점에 get_current_posx()를 불러도 (로봇이 그 사이에
     다른 곳으로 움직이지 않았다면) CAMERA 위치와 같다.
