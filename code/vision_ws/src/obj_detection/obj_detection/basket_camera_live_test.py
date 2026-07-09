@@ -26,6 +26,8 @@ import sys
 import cv2
 
 from obj_detection.basket_camera import (
+    DEFAULT_FRAME_HEIGHT,
+    DEFAULT_FRAME_WIDTH,
     assign_baskets,
     compute_occupancy,
     draw_basket_overlay,
@@ -44,6 +46,15 @@ def main(args=None):
         help="바스켓 조망용 웹캠의 /dev/videoN 인덱스 "
              "(basket_camera.py의 device_index 파라미터와 동일한 값을 쓸 것).",
     )
+    parser.add_argument(
+        "--width", type=int, default=DEFAULT_FRAME_WIDTH,
+        help="캡처 해상도 너비. 카메라가 지원하지 않는 값이면 검은 화면만 나오므로 "
+             "'v4l2-ctl --list-formats-ext'로 지원 해상도를 먼저 확인할 것.",
+    )
+    parser.add_argument(
+        "--height", type=int, default=DEFAULT_FRAME_HEIGHT,
+        help="캡처 해상도 높이 (--width 설명 참고).",
+    )
     parsed, _ros_args = parser.parse_known_args(
         args=args if args is not None else sys.argv[1:]
     )
@@ -54,9 +65,20 @@ def main(args=None):
             f"/dev/video{parsed.device_index}를 열 수 없습니다. "
             "'v4l2-ctl --list-devices'로 장치/인덱스를 다시 확인하세요."
         )
+    # 카메라가 실제로 지원 안 하는 해상도로 열리면 ok=True인데 프레임이 전부
+    # 검은색(픽셀 0)으로만 나오는 문제가 있어(basket_camera.py의 WebcamCapture와
+    # 동일한 이유), 반드시 지원 해상도로 명시 설정한다.
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, parsed.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, parsed.height)
+    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     model = AppleStatusModel()
-    print(f"/dev/video{parsed.device_index} 오픈 완료. 'q'로 종료.", flush=True)
+    print(
+        f"/dev/video{parsed.device_index} 오픈 완료 "
+        f"(요청 {parsed.width}x{parsed.height}, 실제 {actual_w}x{actual_h}). 'q'로 종료.",
+        flush=True,
+    )
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     last_occupancy = None

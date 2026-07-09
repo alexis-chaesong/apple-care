@@ -27,17 +27,31 @@ def generate_launch_description():
         ),
     )
 
+    frame_width_arg = DeclareLaunchArgument(
+        'frame_width', default_value='1280',
+        description="캡처 해상도 너비. 카메라가 지원 안 하는 값이면 검은 화면만 나오니 "
+                    "'v4l2-ctl --list-formats-ext'로 지원 해상도를 먼저 확인할 것.",
+    )
+    frame_height_arg = DeclareLaunchArgument(
+        'frame_height', default_value='720',
+        description="캡처 해상도 높이 (frame_width 설명 참고).",
+    )
+
     basket_camera_node = Node(
         package='obj_detection',
         executable='basket_camera',
         name='basket_detection_node',
         parameters=[{
             'device_index': ParameterValue(LaunchConfiguration('device_index'), value_type=int),
+            'frame_width': ParameterValue(LaunchConfiguration('frame_width'), value_type=int),
+            'frame_height': ParameterValue(LaunchConfiguration('frame_height'), value_type=int),
         }],
         output='screen',
     )
 
     return LaunchDescription([
         device_index_arg,
+        frame_width_arg,
+        frame_height_arg,
         basket_camera_node,
     ])

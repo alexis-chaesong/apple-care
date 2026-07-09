@@ -65,6 +65,15 @@ BASKET_DISPLAY_NAMES = {
 
 APPLE_LABELS = {"apple_normal", "apple_rotten", "apple_damaged"}
 
+# 로지텍 C270 등 UVC 웹캠은 장치가 실제로 지원하는 해상도가 정해져 있는데
+# (`v4l2-ctl --list-devices`로 확인 가능, C270은 최대 1280x720/1280x960),
+# cv2.VideoCapture를 해상도 지정 없이 열면 OpenCV/V4L2가 카메라가 실제로
+# 못 내보내는 해상도(예: 1920x1080)로 협상해버려서 ok=True인데 프레임 전체가
+# 0으로 채워진 완전 검은 화면만 나오는 문제가 실측으로 확인됨. 그래서 오픈
+# 직후 반드시 지원 해상도로 명시적으로 맞춘다.
+DEFAULT_FRAME_WIDTH = 1280
+DEFAULT_FRAME_HEIGHT = 720
+
 
 class WebcamCapture:
     """일반 V4L2 웹캠을 백그라운드 스레드에서 계속 읽어 최신 프레임만 들고 있는 헬퍼.
@@ -74,20 +83,36 @@ class WebcamCapture:
     돌며 최신 프레임을 갱신해둔다 - 그래야 _publish_status 타이머가 항상 최신
     프레임을 즉시 가져다 쓸 수 있다(느린 read()가 타이머 콜백을 막지 않음)."""
 
-    def __init__(self, device_index: int, logger):
+    def __init__(
+        self, device_index: int, logger,
+        frame_width: int = DEFAULT_FRAME_WIDTH, frame_height: int = DEFAULT_FRAME_HEIGHT,
+    ):
         self.cap = cv2.VideoCapture(device_index)
         if not self.cap.isOpened():
             raise RuntimeError(
                 f"/dev/video{device_index}를 열 수 없습니다. "
                 "'v4l2-ctl --list-devices'로 장치/인덱스를 확인하세요."
             )
+
+        # 카메라가 지원하지 않는 해상도로 열리면 검은 화면만 나오므로(위 설명),
+        # 반드시 지원되는 해상도로 명시 설정. 요청한 값을 카메라가 그대로 못
+        # 받아들이면 드라이버가 가장 가까운 지원 해상도로 대체하므로, 실제로
+        # 뭐가 잡혔는지 cap.get()으로 다시 읽어 로그로 남긴다.
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
+        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
         self._logger = logger
         self._frame = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
-        self._logger.info(f"웹캠 오픈 완료: /dev/video{device_index}")
+        self._logger.info(
+            f"웹캠 오픈 완료: /dev/video{device_index} "
+            f"(요청 해상도 {frame_width}x{frame_height}, 실제 {actual_w}x{actual_h})"
+        )
 
     def _capture_loop(self):
         while not self._stop_event.is_set():
@@ -182,9 +207,13 @@ class BasketDetectionNode(Node):
         super().__init__('basket_detection_node')
 
         self.declare_parameter('device_index', 0)
+        self.declare_parameter('frame_width', DEFAULT_FRAME_WIDTH)
+        self.declare_parameter('frame_height', DEFAULT_FRAME_HEIGHT)
         device_index = self.get_parameter('device_index').get_parameter_value().integer_value
+        frame_width = self.get_parameter('frame_width').get_parameter_value().integer_value
+        frame_height = self.get_parameter('frame_height').get_parameter_value().integer_value
 
-        self.webcam = WebcamCapture(device_index, self.get_logger())
+        self.webcam = WebcamCapture(device_index, self.get_logger(), frame_width, frame_height)
         self.model = AppleStatusModel()
 
         self.status_pub = self.create_publisher(String, 'basket_status', 10)
