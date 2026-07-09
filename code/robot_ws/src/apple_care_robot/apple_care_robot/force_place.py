@@ -17,22 +17,6 @@ DOWN_SPEED_ACC = 20        # 가속도
 MAX_DOWN_DISTANCE = 150    # 접촉을 못 찾았을 때 최대 몇 mm까지 내려갈지 (안전 마진 확보)
 FORCE_THRESHOLD = 4        # 힘 변화량 임계값 (N) - 필요시 8~15 사이로 튜닝
 
-# 이미 사과가 있는 박스는 새 사과가 기존 사과에 닿을 때 변동량이 더 작게 나와서
-# (실측 약 3N) 기본 FORCE_THRESHOLD(4N)로는 접촉 감지에 실패했음. 그래서 이미
-# 사과가 있는 박스 전용으로 더 낮은 임계값을 따로 둠.
-EXISTING_APPLE_FORCE_THRESHOLD = 3  # N
-
-# 이미 사과가 있다고 알려진 박스에 접근할 때 쓰는 속도 (평소보다 훨씬 느리게).
-CAREFUL_APPROACH_VEL = 15  # mm/s
-CAREFUL_APPROACH_ACC = 15
-
-# 박스에 이미 사과가 있으면, 원래 hover 좌표(box_pos, 빈 박스 기준으로 잡은 높이)보다
-# 사과 더미 꼭대기가 더 높이 나와 있을 수 있음. 그 상태로 box_pos까지 블라인드로
-# movel 해버리면 힘제어가 걸리기도 전에 그대로 부딪힘. 그래서 이미 사과가 있는
-# 박스는 box_pos보다 이만큼 더 높은 위치까지만 movel로 접근하고, 그 지점부터
-# force_controlled_place로 힘제어 하강을 시작해서 사과 더미와의 접촉도 힘으로 감지함.
-EXISTING_APPLE_HOVER_CLEARANCE = 40  # mm
-
 # 타임아웃은 항상 "최대 하강 시간"보다 여유 있게 잡아야 함.
 # (DOWN_SPEED_VEL/MAX_DOWN_DISTANCE를 바꿔도 자동으로 맞춰지도록 계산식으로 둠)
 _TRAVEL_TIME = MAX_DOWN_DISTANCE / DOWN_SPEED_VEL
@@ -68,7 +52,6 @@ def force_controlled_place(
         node: rclpy 노드 (로그 출력용)
         current_pos: 하강을 시작할 현재 위치 (posx 타입)
         force_threshold: 접촉으로 판단할 힘 변화량 임계값 (N).
-            이미 사과가 있는 박스는 EXISTING_APPLE_FORCE_THRESHOLD를 넘겨서 호출.
         emergency_stop_event: 넘겨주면(threading.Event), 하강 힘제어 루프 중에도
             비상정지를 감시함 - 걸려 있으면 즉시 하드웨어 정지 후
             safe_motion.EmergencyStopError를 던짐 (호출부가 잡아서 복구해야 함).

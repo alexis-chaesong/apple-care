@@ -7,7 +7,9 @@ detection.py
 
 판정 파이프라인 (handle_get_status 기준):
     1) YOLO(AppleStatusModel)가 컬러 프레임에서 사과 후보 박스를 찾는다
-       (apple_normal / apple_rotten / apple_damaged / apple_small 중 하나 + confidence).
+       (apple_normal / apple_rotten / apple_damaged 중 하나 + confidence).
+       "basket"(담는 용기 자체를 학습시킨 클래스)은 bbox 인식/디버그 표시에만
+       쓰이고(yolo.py/debug_overlay.py), 이 판정 파이프라인에는 관여하지 않음.
     2) 그 박스가 진짜 물체인지 depth로 재검증한다 - 박스 안쪽이 바로 바깥
        배경보다 확실히 튀어나와 있어야 통과 (사진/그림자 등 오탐 방지).
        -> _box_ring_depths
@@ -26,8 +28,9 @@ detection.py
     5) apple_normal/apple_damaged로 판정된 것들은 depth로 잰 실제 지름(mm)이
        ABSOLUTE_SMALL_DIAMETER_MM 이하로 확연히 작으면 "apple_small"로
        재분류한다. -> _classify_size / _real_world_diameter_mm
-       (YOLO가 apple_small을 직접 학습했지만, 이건 depth 실측으로 "진짜
-       물리적으로 작은지"를 다시 확인하는 이중 안전망)
+       (apple_small은 YOLO가 직접 내는 라벨이 아니라 이 depth 실측 재분류로만
+       나오는 최종 상태값임 - 재학습하면서 YOLO 클래스에서는 apple_small이
+       빠지고 그 자리에 basket이 들어감)
 
 이 파일에는 ROS2 노드 본체(초기화, get_apple_status 서비스 콜백, 종료)만 있고,
 실제 로직은 mixin 3개로 나뉘어 있다 (파일이 너무 길어져서 분리함):
