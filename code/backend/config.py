@@ -174,6 +174,15 @@ class Settings:
     default_factory=lambda: int(os.getenv("HITL_MAX_REASK_ATTEMPTS", "2"))
     )
 
+    hitl_batch_grace_sec: float = field(
+        default_factory=lambda: float(os.getenv("HITL_BATCH_GRACE_SEC", "5.0"))
+    )
+    # hitl_batch_grace_sec: 대기열(_pending)에 쌓인 다음 HITL 질문을 이어서 시작하기 전
+    # 두는 유예 시간. 세션 하나가 끝나자마자(성공/타임아웃 모두) 곧바로 다음 질문의
+    # TTS+재질문 카운트다운이 시작되면, 관리자가 방금 전 질문에 답하고 화면에서
+    # 눈을 떼는 그 순간 다음 질문이 이미 카운트다운 중이라 타이밍을 놓쳐 STUCK으로
+    # 빠지기 쉬움. 여유를 두어 관리자가 다음 질문을 인지할 시간을 확보함.
+
     stt_sample_rate: int = field(default_factory=lambda: int(os.getenv("STT_SAMPLE_RATE", "16000")))
     stt_recording_duration_sec: float = field(
         default_factory=lambda: float(os.getenv("STT_RECORDING_DURATION_SEC", "8.0"))

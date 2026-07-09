@@ -190,6 +190,22 @@ async def _vla_consumer_loop() -> None:
                 )
                 continue
 
+            # HITL 세션이 이미 진행 중이면(=아직 같은 자리에서 답변을 기다리는 중)
+            # 새 판단을 하지 않고 건너뜀. 로봇은 decision_queue.get()으로 대기 중이라
+            # 이 사이 물리적으로 다른 사과로 안 바뀌므로, 이 구간에 들어오는 Vision
+            # 감지는 사실상 "아직 처리 안 된 같은 사과"의 재감지임. vision_bridge.py의
+            # 디바운스는 position이 threshold(vision_position_dedup_threshold_mm)를
+            # 살짝만 넘게 흔들려도(카메라 노이즈) "새 사과"로 오판해 큐에 다시 넣을 수
+            # 있는데, 그걸 여기서 한 번 더 걸러내지 않으면 같은 사과가 hitl_state_machine
+            # ._pending에 중복으로 계속 쌓여 세션이 끝날 때마다 또 같은 걸 재질문하게 됨
+            # (관리자가 답할 타이밍을 못 맞춰 STUCK이 반복되는 원인).
+            if hitl_state_machine.current_session is not None:
+                logger.debug(
+                    "HITL 세션 진행 중이라 Vision 판단 건너뜀 (같은 사과 재감지로 추정): fruit_type=%s",
+                    raw_feature.fruit_type,
+                )
+                continue
+
             try:
                 result = decide(raw_feature)
 
