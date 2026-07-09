@@ -73,7 +73,9 @@ def pick_apple(
     Returns:
         bool: 파지 성공 여부 (손목 힘 센서로 접촉/파지가 확인됐는지)
     """
-    from apple_care_robot.grasp_force import grasp_apple_with_force_feedback
+    from apple_care_robot.grasp_force import (
+        grasp_apple_with_force_feedback, descend_to_pick_with_reaction_guard,
+    )
     from apple_care_robot.wall_avoidance import compute_wall_aware_approach
 
     if safe_movel_fn is None:
@@ -88,8 +90,21 @@ def pick_apple(
         node.get_logger().info(f'사과가 트레이 벽 근처로 판단되어 대각선 경유점을 먼저 거칩니다: {hover_pos}')
         safe_movel_fn(hover_pos)
 
+    # 마지막 pick_pos 접근은 safe_movel_fn(위치 제어만)이 아니라 반발력을 함께
+    # 감시하는 descend_to_pick_with_reaction_guard를 씀 - 실측으로 확인된 문제:
+    # 겹쳐 있는 사과 중 하나로 그리퍼가 열린 채 내려가다 다른 하나를 눌러서
+    # 하드웨어 안전정지가 걸리는 사례가 있었음. 이 함수가 반발력을 미리 감지해
+    # 베이스 기준 +Z로 후퇴 후 재시도하므로, 여기서 실패(False)하면 그리퍼가
+    # 아직 열려 있는 상태이므로 아래 grasp_apple_with_force_feedback을 부를
+    # 필요 없이 곧바로 파지 실패로 취급하면 됨 (호출부의 그립 재시도 루프로 위임).
     node.get_logger().info(f'사과 집기 위치로 이동: {pick_pos}')
-    safe_movel_fn(pick_pos)
+    reached = descend_to_pick_with_reaction_guard(
+        node, pick_pos,
+        emergency_stop_event=emergency_stop_event, stop_node=stop_node,
+        check_hw_safety_stop=check_hw_safety_stop,
+    )
+    if not reached:
+        return False
 
     node.get_logger().info('실시간 힘 감지로 그리퍼 닫기 (사과 크기에 맞춰 힘 자동 조절)')
     applied_force, picked_ok = grasp_apple_with_force_feedback(

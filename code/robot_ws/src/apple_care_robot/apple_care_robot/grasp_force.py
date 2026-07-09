@@ -38,6 +38,115 @@ MAX_GRASP_STEPS = 6             # 무한 증가 방지 안전 장치 (6단계 * 
 # 감지 즉시 멈추는 대신 안전 여유분만큼 한 번 더 힘을 얹어줌.
 SAFETY_MARGIN_STEPS = 2         # 안전 여유분 단계 수 (2단계 = +100, FORCE_STEP 기준)
 
+# ---------------------------------------------------------------------------
+# 겹쳐 있는 사과 접근 중 반발력 감지 시 후퇴
+# ---------------------------------------------------------------------------
+# 실측으로 확인된 문제: 겹쳐 있는 사과 두 개를 인식해도, 그 중 하나(pick_pos)로
+# 그리퍼가 열린 채 내려가는 도중에 다른 하나를 옆에서 눌러버려 하드웨어 안전정지가
+# 걸리는 사례가 있었음. grasp_apple_with_force_feedback()은 이미 pick_pos에
+# 도착해 그리퍼를 "닫는" 단계의 힘만 감시하므로 이 구간은 다루지 못함 - 그래서
+# "그리퍼가 열린 채 pick_pos로 내려가는 하강 구간" 자체를 별도로 감시해야 함.
+REACTIVE_CONTACT_FORCE_THRESHOLD_N = 10.0  # 하강 중 이 값(N) 이상 반발력이 튀면 "의도치 않은 접촉"으로 판단
+RETREAT_LIFT_MM = 30            # 접촉 감지 시 베이스 기준 +Z로 후퇴하는 거리(mm) - 사용자 지정값
+MAX_DESCENT_RETRIES = 2         # 후퇴 후 재시도 최대 횟수 (다 써도 실패하면 호출부의 그립 재시도에 맡김)
+DESCENT_POLL_SEC = 0.02
+
+
+def descend_to_pick_with_reaction_guard(
+    node, pick_pos, *, emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
+    vel=None, acc=None,
+):
+    """
+    pick_pos로 하강하되, 도착 전에 반발력이 튀면(=옆에 겹쳐 있던 다른 사과를
+    밀어붙인 것으로 추정) 하드웨어 안전정지로 이어지기 전에 먼저 멈추고 베이스
+    기준 +Z로 RETREAT_LIFT_MM만큼 후퇴한 뒤 재시도한다.
+
+    pick_helpers.pick_apple()이 hover_pos 이후 마지막 pick_pos 접근 구간에서
+    safe_movel_fn 대신 이 함수를 호출해야 함 - 그래야 그리퍼가 아직 열려 있는
+    이 구간에서 예상 밖의 저항을 별도로 감시할 수 있음.
+
+    Args:
+        node: rclpy 노드 (로그 출력용).
+        pick_pos: 최종 grasp 목표 위치 (posx 값).
+        emergency_stop_event/stop_node/check_hw_safety_stop: safe_motion.safe_movel과
+            동일한 의미 - 하강 중에도 소프트웨어/하드웨어 비상정지를 감시함.
+        vel/acc: 하강 속도/가속도 (None이면 컨트롤러 기본값).
+
+    Returns:
+        bool: True면 pick_pos에 정상 도착. False면 재시도(MAX_DESCENT_RETRIES회)를
+        다 썼는데도 계속 접촉이 감지되어 포기함 - 호출부는 이 경우를 파지 실패로
+        취급해 기존 그립 재시도 루프(box_sequence_test.py의 MAX_PICK_ATTEMPTS)로
+        넘어가야 함.
+
+    Raises:
+        EmergencyStopError: 소프트웨어/하드웨어 비상정지가 감지되면 그대로 전파됨
+        (safe_movel과 동일한 계약 - 호출부의 단일 except에서 처리됨).
+    """
+    import time as _time
+
+    from DSR_ROBOT2 import (
+        amovel, movel, posx, get_current_posx, get_tool_force, check_motion,
+        DR_BASE, DR_MV_MOD_REL,
+    )
+    from apple_care_robot.safe_motion import raise_if_emergency_stop, make_hw_safety_watcher
+
+    hw_safety_watch = make_hw_safety_watcher(
+        stop_node or node, emergency_stop_event,
+        check_hw_safety_stop if emergency_stop_event is not None else None,
+    )
+
+    for attempt in range(1, MAX_DESCENT_RETRIES + 2):  # 최초 시도 1회 + 재시도 MAX_DESCENT_RETRIES회
+        baseline = get_tool_force(DR_BASE)
+        baseline_fz = baseline[2] if isinstance(baseline, list) and len(baseline) >= 3 else 0.0
+
+        amovel(pick_pos, vel=vel, acc=acc, ref=DR_BASE)
+        _time.sleep(0.1)  # 출발 직후 관성 노이즈 스킵 (force_place.py와 동일한 이유)
+
+        contact_detected = False
+        while check_motion():
+            if emergency_stop_event is not None:
+                raise_if_emergency_stop(stop_node or node, emergency_stop_event)
+            hw_safety_watch()
+
+            force = get_tool_force(DR_BASE)
+            if isinstance(force, list) and len(force) >= 3:
+                deviation = abs(force[2] - baseline_fz)
+                if deviation >= REACTIVE_CONTACT_FORCE_THRESHOLD_N:
+                    contact_detected = True
+                    node.get_logger().warn(
+                        f'[pick] 하강 중 예상 밖 반발력 감지(변동량={deviation:.2f}N) - '
+                        '겹친 사과를 눌렀을 가능성 - 하강을 중단하고 후퇴합니다.'
+                    )
+                    break
+            _time.sleep(DESCENT_POLL_SEC)
+
+        if not contact_detected:
+            return True  # 정상 도착
+
+        # 남은 하강 목표를 취소(현재 위치로 재지정) - force_place.py의 취소 기법과 동일.
+        # 이걸 안 하면 후퇴 이동을 내려도 컨트롤러 내부에 남아있는 원래 하강 목표가
+        # 다시 끼어들어 후퇴가 상쇄될 수 있음.
+        stop_pos, _ = get_current_posx(DR_BASE)
+        if stop_pos is not None:
+            amovel(stop_pos, ref=DR_BASE)
+            _time.sleep(0.1)
+
+        if attempt > MAX_DESCENT_RETRIES:
+            node.get_logger().error(
+                f'[pick] 반발력 회피 재시도({MAX_DESCENT_RETRIES}회)를 다 썼는데도 계속 '
+                '접촉이 감지되어 이번 pick_pos 접근을 포기합니다.'
+            )
+            return False
+
+        node.get_logger().info(
+            f'[pick] 베이스 기준 +Z {RETREAT_LIFT_MM}mm 후퇴 후 재시도합니다 '
+            f'({attempt}/{MAX_DESCENT_RETRIES}).'
+        )
+        retreat_pos = posx(0, 0, RETREAT_LIFT_MM, 0, 0, 0)
+        movel(retreat_pos, ref=DR_BASE, mod=DR_MV_MOD_REL)
+
+    return False
+
 
 def grasp_apple_with_force_feedback(
     node, initial_force=100, *, emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,

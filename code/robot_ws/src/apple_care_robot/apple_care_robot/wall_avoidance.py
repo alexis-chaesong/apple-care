@@ -96,9 +96,17 @@ CORNER_APPROACH_HOVER_CLEARANCE_MM = 50.0
 # 그립 순간 손가락이 스칠 수 있다. hover 단계에서 이미 충분히 우회했으므로,
 # 최종 grasp 지점은 기울인 뒤의 실제 툴 자세 기준 -Y축 방향으로 이 값(mm)만큼
 # TCP를 더 이동시켜서 여유를 조정한다 (베이스 프레임 escape_dir이 아니라 툴
-# -Y축 기준 - compute_wall_aware_approach 참고). 벽 하나만 가까운 경우는
-# 기존처럼 pick_pos를 건드리지 않는다(그동안 문제 없었음).
+# -Y축 기준 - compute_wall_aware_approach 참고).
 CORNER_PICK_INSET_MM = 5.0
+
+# 실측으로 확인된 문제: 벽 하나만 가까워서 기울여 접근하는 경우(모서리 아님),
+# 최종 grasp 지점을 pick_pos 그대로 두면 기울인 자세 기준으로 그리퍼가 벽 쪽
+# 사과를 살짝 덜 파고들어(그립 위치가 벽 반대쪽으로 조금 치우쳐) 파지가
+# 불안정해지는 사례가 있었음. 모서리와 동일한 원리로, 기울인 뒤의 실제 툴 자세
+# 기준 -Y축 방향으로 이만큼(mm) TCP를 더 이동시켜 보정한다(실측 튜닝 범위 5~8mm
+# 중간값). 기울이지 않는 경우(STRAIGHT_APPROACH_WALLS)는 적용하지 않음 - 그
+# 경우는 tilt 자체가 없어 이 보정의 전제(기울인 방향으로 덜 들어감)가 성립하지 않음.
+WALL_PICK_INSET_MM = 6.5
 
 
 def is_within_tray_bounds(x, y) -> bool:
@@ -254,13 +262,22 @@ def compute_wall_aware_approach(pick_pos, posx_factory):
     hover_clearance_mm = (
         CORNER_APPROACH_HOVER_CLEARANCE_MM if is_corner else WALL_APPROACH_HOVER_CLEARANCE_MM
     )
-    pick_inset_mm = CORNER_PICK_INSET_MM if is_corner else 0.0
 
     # 상단(y_max) 벽 하나에만 가까운 경우는 기울이지 않고 "직선 접근"으로 예외
     # 처리 - STRAIGHT_APPROACH_WALLS 정의 참고 (여러 사과가 나란히 놓이는 벽이라
     # tilt로 인한 옆 이동이 이웃 사과와 부딪힐 위험이 있음). 모서리는 제외(그대로 기울임).
     if not is_corner and close_walls <= STRAIGHT_APPROACH_WALLS:
         tilt_deg = 0.0
+
+    # pick_inset_mm은 반드시 위의 STRAIGHT_APPROACH_WALLS 예외 처리(tilt_deg=0.0)
+    # 이후에 계산해야 함 - 기울이지 않는 경우까지 보정을 걸면 안 되므로 최종
+    # tilt_deg 값을 기준으로 판단한다.
+    if is_corner:
+        pick_inset_mm = CORNER_PICK_INSET_MM
+    elif tilt_deg > 0:
+        pick_inset_mm = WALL_PICK_INSET_MM
+    else:
+        pick_inset_mm = 0.0
 
     ex, ey = escape_dir
     new_rx, new_ry, new_rz = _tilt_orientation((rx, ry, rz), escape_dir, tilt_deg)
