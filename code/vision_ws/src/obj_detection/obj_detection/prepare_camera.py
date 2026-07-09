@@ -13,12 +13,12 @@ obj_detection의 카메라 인식 노드(object_detection)를 띄우기 전에 �
     2) 로봇을 HOME -> CAMERA 순서로 이동시켜서 카메라가 트레이를 내려다보는
        고정 자세를 만든다.
 
-⚠️ CAMERA 좌표는 실제로 사과 인식/피킹에 쓰는 스크립트(box_sequence_test.py /
-apple_sorting_cycle.py)의 CAMERA 값과 반드시 같아야 한다. vision_transform.
+⚠️ CAMERA 좌표는 실제로 사과 인식/피킹에 쓰는 스크립트(box_sequence_test.py)의
+CAMERA 값과 반드시 같아야 한다. vision_transform.
 camera_to_base()가 "카메라가 사과를 본 순간의 로봇 pose"를 기준으로 좌표를
 변환하므로, 이 스크립트가 로봇을 다른 위치에 세워두면 이후 배경 캘리브레이션
 (_calibrate_scene)이 엉뚱한 시야 기준으로 이루어짐. 좌표를 바꿀 일이 있으면
-세 파일(prepare_camera.py / box_sequence_test.py / apple_sorting_cycle.py)의
+두 파일(prepare_camera.py / box_sequence_test.py)의
 CAMERA 값을 같이 맞춰야 한다.
 
 ⚠️ 로봇 제어(DSR_ROBOT2)에는 여전히 의존하므로 robot_ws가 빌드/소싱되어 있어야

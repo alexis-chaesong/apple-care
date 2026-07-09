@@ -3,7 +3,7 @@ Gripper Open/Close (OnRobot RG2, Modbus/TCP 직접 제어)
 =========================================================
 
 box_sequence_test.py 등에서
-    from apple_care_robot.openclose import gripper_open, gripper_close
+    from apple_care_robot.openclose import gripper_open, gripper_close_with_force
 형태로 가져다 씀.
 
 OnRobotRGControllerServer ROS2 노드나 "/onrobot/sendCommand" 서비스에는
@@ -80,15 +80,6 @@ def gripper_open() -> bool:
     ok = _send_command(GRIPPER_MAX_FORCE, GRIPPER_MAX_WIDTH)
     if not ok:
         print("[openclose] 그리퍼 오픈 명령 전송 실패")
-    time.sleep(MOTION_WAIT_SEC)
-    return ok
-
-
-def gripper_close() -> bool:
-    """그리퍼를 닫는 함수 (사과를 집을 때 호출). 성공 여부를 bool로 반환."""
-    ok = _send_command(GRIPPER_MAX_FORCE, 0)
-    if not ok:
-        print("[openclose] 그리퍼 클로즈 명령 전송 실패")
     time.sleep(MOTION_WAIT_SEC)
     return ok
 
