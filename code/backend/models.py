@@ -163,8 +163,12 @@ class DecisionResult(BaseModel):
     destination: Optional[str] = None
     # action이 execute일 때만 값이 채워짐. 어느 박스로 보낼지
 
-    reason: Literal["rule_match", "memory_match", "low_confidence", "unknown_object"]
+    reason: Literal["risk_accept_execute", "low_confidence", "unknown_object"]
     # 왜 이런 판단이 나왔는지 근거. 로그/디버깅 및 데모 시연 설명용으로 중요
+    # Track2/3: execute 분기는 source(llm_policy/human_feedback)와 무관하게 항상
+    # "risk_accept_execute"다 - Stage3 게이트를 통과한 모든 execute는 EVPI_human <=
+    # Cost_human(t)이라는 위험 감수 판단의 결과이지, "규칙이라 무조건 신뢰"가 아니기 때문
+    # (예전 rule_match/memory_match 구분은 하드코딩 threshold 시절의 유물이라 제거됨).
 
     fruit_type: str
     condition: str

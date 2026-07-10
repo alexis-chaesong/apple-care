@@ -1,0 +1,3 @@
+[colcon_core.environment]
+ament_prefix_path = colcon_ament_prefix_path_fix.environment.ament_prefix_path:AmentPrefixPathEnvironment
+

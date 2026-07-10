@@ -48,7 +48,9 @@ from connection_manager import connection_manager
 from vision_bridge import vision_bridge_manager
 from services import llm_service
 from services.llm_service import LLMTimeoutError, LLMParseError, LLMAuthError
-from services.bayesian_policy import record_human_feedback
+from services.bayesian_policy import get_or_init_theta, record_human_feedback
+from services.decision_audit import log_stage3_human_resolved
+from services.vlm_gate import UNIDENTIFIED_OBJECT_FRUIT_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,9 @@ class HITLSession:
     state: HITLState = HITLState.IDLE
     attempt: int = 0
     session_id: str = dc_field(default_factory=lambda: __import__("uuid").uuid4().hex[:8])
+    hold_started_at: Optional[float] = None
+    # §4.3.4 tau_hold(t) 계산용 - _run_session()이 실제로 HOLD를 발행하는
+    # 시점에 채워짐. _pending 큐에 쌓여있는 동안(아직 HOLD 미발행)은 None.
 
 
 class HITLStateMachine:
@@ -150,6 +155,32 @@ class HITLStateMachine:
         """hitl_router.py가 '지금 이 답변이 어떤 fruit_type/condition에 대한 것인지'
         알아야 할 때 조회용으로 사용"""
         return self._current
+
+    @property
+    def congestion_n(self) -> int:
+        """§4.3.4 n(t): "대기 중인 HITL 요청 수 (_pending deque 길이 + 현재 세션, FIFO)".
+
+        decision_planner.decide()가 Stage3 게이트(EVPI vs Cost_human(t)) 계산 직전에
+        조회하는 값이라 정확한 락(lock) 없이 즉시 읽는다 - 근사적인 혼잡도 신호로만
+        쓰이므로, _current/_pending을 다른 코루틴이 동시에 건드리는 순간과 정확히
+        겹쳐도 (±1 정도의 오차) 실질적 문제가 되지 않는다.
+        """
+        if self._current is not None:
+            return len(self._pending) + 1
+        return len(self._pending)
+
+    @property
+    def congestion_tau_hold(self) -> float:
+        """§4.3.4 tau_hold(t): "최장 대기 세션의 HOLD 지속 시간".
+
+        _pending에 쌓인 요청들은 아직 로봇을 실제로 HOLD시키지 않은 상태이므로
+        (한 번에 하나의 세션만 실제로 HOLD를 발행함, 클래스 상단 docstring
+        "동시 Unknown Object 처리" 참고), "가장 오래 대기 중인 세션"은 곧 현재
+        활성 세션이다. 활성 세션이 없거나 아직 HOLD가 발행되기 전이면 0.0.
+        """
+        if self._current is None or self._current.hold_started_at is None:
+            return 0.0
+        return time.time() - self._current.hold_started_at
 
     # ------------------------------------------------------------------
     # 관리자 강제 개입 (POST /api/robot/reset)
@@ -225,6 +256,7 @@ class HITLStateMachine:
             payload={"fruit_type": session.fruit_type, "condition": session.condition},
         )
         session.state = HITLState.HOLD
+        session.hold_started_at = time.time()
         logger.info(
             "HITL 세션 시작 (session_id=%s): fruit=%s condition=%s",
             session.session_id, session.fruit_type, session.condition,
@@ -334,14 +366,24 @@ class HITLStateMachine:
 
         # 1) 질문 생성 및 TTS 출력
         session.state = HITLState.ASKING
+        # Track6: session.fruit_type은 이제 "unknown" 리터럴이 아니라
+        # decision_planner._decide_unknown_object()가 채워준 값이다 - VLM이
+        # 식별에 성공했으면 그 이름("망치" 등), 실패했거나 이미지 자체가
+        # 없었으면 UNIDENTIFIED_OBJECT_FRUIT_TYPE(내부 폴백 라벨, "unidentified_object")이다.
+        # 후자를 그대로 사람에게 들려줄 문장에 노출하면 "unidentified_object 처리
+        # 방법을 확인해 주세요"처럼 부자연스러운 내부 라벨이 새어나가므로, 실제
+        # 식별에 성공한 경우에만 그 이름을 쓰고 그 외엔 항상 자연스러운 한국어
+        # 표현("미확인 물체")으로 치환한다.
+        has_identified_name = session.fruit_type not in ("unknown", UNIDENTIFIED_OBJECT_FRUIT_TYPE)
+        display_fruit_label = session.fruit_type if has_identified_name else "미확인 물체"
         try:
-            fruit_guess = session.fruit_type if session.fruit_type != "unknown" else None
+            fruit_guess = session.fruit_type if has_identified_name else None
             question = await llm_service.generate_unknown_question(fruit_guess)
         except (LLMTimeoutError, LLMParseError, LLMAuthError):
             # 질문 생성 자체가 실패하면 정형화된 fallback 문장 사용
             # (여기서마저 실패하면 로봇이 영원히 조용히 멈춰있게 되므로 반드시 fallback 필요)
             logger.warning("질문 생성 실패, fallback 문장 사용 (session_id=%s)", session.session_id)
-            question = f"{session.fruit_type} 처리 방법을 확인해 주세요. 정상, 가공, 폐기 중 선택해 주세요."
+            question = f"{display_fruit_label} 처리 방법을 확인해 주세요. 정상, 가공, 폐기 중 선택해 주세요."
 
         from stt_tts import tts_service  # 지연 import: 순환 참조 방지 및 아직 미구현 상태 대비
 
@@ -403,12 +445,29 @@ class HITLStateMachine:
             return True
 
         # 4) 정책 학습 반영 + 로봇 재개
+        # alpha_before/beta_before 스냅샷은 반드시 get_or_init_theta()를 통해
+        # 계산한다 (Track4 "재발 방지" 항목) - 하드코딩된 flat prior를 직접
+        # 넣으면 계층적 prior(USE_HIERARCHICAL_PRIOR) 활성화 시 감사 로그가
+        # 실제 초기화값과 어긋난다.
+        theta_before = get_or_init_theta(session.fruit_type, session.condition)
         updated_policy = record_human_feedback(
             fruit_type=session.fruit_type,
             condition=session.condition,
             destination=destination,
             raw_answer=raw_answer,
             session_id=session.session_id,
+        )
+        log_stage3_human_resolved(
+            fruit_type=session.fruit_type,
+            condition=session.condition,
+            destination=destination,
+            alpha_before=theta_before["alpha"],
+            beta_before=theta_before["beta"],
+            alpha_after=updated_policy["alpha"],
+            beta_after=updated_policy["beta"],
+            session_id=session.session_id,
+            c_yolo=session.vision_confidence,
+            position=session.position,
         )
         # 로봇 쪽(apple_sorting_cycle.py)은 /robot/command의 RESUME을 실제로 처리하지
         # 않고 경고 로그만 남기고 무시하도록 되어 있음 (아직 그 부분은 미구현). 로봇의

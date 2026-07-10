@@ -55,7 +55,7 @@ from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from sensor_msgs.msg import Image
 
-from apple_care_msgs.srv import SrvAppleStatus
+from apple_care_msgs.srv import SrvAppleStatus, SrvCaptureFrame
 from obj_detection.realsense import ImgNode
 from obj_detection.yolo import AppleStatusModel, MIN_KNOWN_CONFIDENCE
 from obj_detection.depth_utils import DepthAnalysisMixin, HEIGHT_DIFF_MARGIN_MM
@@ -78,6 +78,13 @@ YOLO_TRUST_CONFIDENCE = 0.7
 # (정상 사과는 대략 70~80mm대 - size_classifier.py 참고. 측정 오차 여유를 크게
 # 둬도 사과 하나가 이 값을 넘을 일은 없음)
 MAX_PLAUSIBLE_APPLE_DIAMETER_MM = 120
+
+# capture_frame 서비스(Track6 VLM Gate 전용 온디맨드 이미지 캡처) JPEG 인코딩 품질.
+# debug_image 스트림의 DEBUG_IMAGE_JPEG_QUALITY(70, backend/robot_bridge.py)보다
+# 약간 높게 잡음 - 그쪽은 HMI 화면에 사람이 실시간으로 보는 용도라 대역폭이
+# 더 중요하지만, 이건 GPT-4o Vision 인식 정확도가 더 중요한 1회성 캡처라 화질을
+# 살짝 우선함. GPT-4o 인식 정확도와 대역폭 트레이드오프 - 실측 후 조정 가능한 잠정치.
+CAPTURE_FRAME_JPEG_QUALITY = 85
 
 
 class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayMixin, Node):
@@ -118,12 +125,26 @@ class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayM
         # 콜백 그룹을 분리하고 MultiThreadedExecutor로 동시에 돌린다 (main() 참고)
         self.service_cb_group = MutuallyExclusiveCallbackGroup()
         self.timer_cb_group = MutuallyExclusiveCallbackGroup()
+        # capture_frame(Track6, condition="unknown"일 때만 온디맨드 호출)을 별도
+        # 콜백 그룹으로 분리한 이유: get_apple_status와 같은 그룹(service_cb_group)에
+        # 두면 MutuallyExclusiveCallbackGroup 특성상 get_apple_status가 프레임을
+        # 모으는 ~1초 동안 capture_frame 호출이 그 뒤에서 대기해야 한다. capture_frame은
+        # 단순히 "지금 들고 있는 최신 프레임 하나를 즉시 인코딩해 반환"하는 가벼운
+        # 작업이라 get_apple_status의 느린 폴링 사이클에 발목 잡힐 이유가 없음.
+        self.capture_frame_cb_group = MutuallyExclusiveCallbackGroup()
 
         self.create_service(
             SrvAppleStatus,
             'get_apple_status',
             self.handle_get_status,
             callback_group=self.service_cb_group,
+        )
+
+        self.create_service(
+            SrvCaptureFrame,
+            'capture_frame',
+            self.handle_capture_frame,
+            callback_group=self.capture_frame_cb_group,
         )
 
         self.debug_image_pub = self.create_publisher(Image, 'obj_detection/debug_image', 10)
@@ -257,6 +278,60 @@ class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayM
         response.position = [float(x) for x in position]
         debug_info['final_status'] = response.status
         self._set_last_debug_info(debug_info)
+        return response
+
+    def handle_capture_frame(self, request, response):
+        """Track6 VLM Gate 전용 온디맨드 이미지 캡처 서비스.
+
+        backend가 condition="unknown"으로 판정했을 때만(1Hz get_apple_status
+        폴링과는 완전히 별개로) 호출한다. 요청 필드가 없다(호출 자체가 트리거) -
+        SrvCaptureFrame.srv 참고.
+
+        동기화 근사에 대한 설계 결정 (완벽 동기화 대안과 비교 검토 후 채택):
+        이 핸들러는 "호출된 바로 그 순간"의 self.img_node.get_color_frame()을
+        그대로 인코딩해서 돌려준다 - handle_get_status()가 "unknown"이라고
+        판정한 시점의 프레임을 캐싱해뒀다가 그걸 돌려주는 방식은 아니다.
+
+        두 방식을 검토했다:
+          (a) 온디맨드(채택): 호출 시점의 최신 프레임을 그대로 씀. 기존
+              debug_image 스트림(_publish_debug_image)이 이미 같은 종류의
+              근사(호출/퍼블리시 시점의 최신 프레임을 씀, "그 판정을 만든
+              프레임"과 정확히 같다는 보장 없음)를 쓰고 있어 이 코드베이스에서
+              이미 받아들여진 패턴이다.
+          (b) 캐싱: handle_get_status()가 "unknown"을 반환하는 순간 프레임을
+              별도로 저장해뒀다가, capture_frame 호출 시 그 캐시를 반환.
+              시간적으로 더 정확하지만 (1) SrvCaptureFrame.srv가 요청 필드가
+              없어(사용자 확정 스펙) 어느 판정 건에 대한 캡처인지 상관관계를
+              전달할 방법이 애초에 없고("가장 최근 unknown 캐시"만 가능),
+              (2) 캐시 유효기간/무효화 로직이 새로 필요해지며, (3) 이 시스템은
+              한 번에 사과 하나만 CAMERA 위치에서 처리하고(main.py의 READY
+              게이팅 + HITL 세션 직렬화) 그 사과가 판정 완료 전까지 로봇이
+              움직이지 않으므로, 실제로는 (a)와 (b)가 같은 프레임을 가리킬
+              확률이 매우 높다 - 정확도 이득 대비 복잡도가 안 맞는다고 판단.
+        결론: (a) 채택. 물리 드라이런에서 실제로 프레임이 어긋나는 사례가
+        관찰되면 그때 (b)로 전환을 재검토한다.
+        """
+        frame = self.img_node.get_color_frame()
+        if frame is None:
+            self.get_logger().warning("capture_frame 호출됨 - 아직 컬러 프레임이 없어 실패 응답")
+            response.success = False
+            response.image_data = []
+            response.encoding = ""
+            return response
+
+        ok, jpeg = cv2.imencode(
+            '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, CAPTURE_FRAME_JPEG_QUALITY]
+        )
+        if not ok:
+            self.get_logger().error("capture_frame: JPEG 인코딩 실패")
+            response.success = False
+            response.image_data = []
+            response.encoding = ""
+            return response
+
+        response.success = True
+        response.image_data = jpeg.tobytes()
+        response.encoding = "jpeg"
         return response
 
     def _set_last_debug_info(self, debug_info):

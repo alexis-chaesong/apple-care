@@ -1,0 +1,4 @@
+---
+bool success
+uint8[] image_data
+string encoding
