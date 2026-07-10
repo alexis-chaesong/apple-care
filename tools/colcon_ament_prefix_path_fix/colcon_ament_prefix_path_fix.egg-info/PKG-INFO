@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: colcon-ament-prefix-path-fix
+Version: 0.0.1
+Summary: Local colcon-core environment extension that fills the missing ament_prefix_path hook for ament_cmake packages (colcon-ros 0.5.0 gap workaround). See BEFORE_AFTER_INTEGRATION.md.
+Home-page: UNKNOWN
+Author: apple-care
+License: Apache License, Version 2.0
+Platform: UNKNOWN
+
+UNKNOWN
+

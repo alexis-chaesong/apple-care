@@ -110,6 +110,47 @@ def init_db():
         );
     """)
 
+    # 6. Decision Audit 로그 테이블 생성 (Track 4, §8)
+    # tb_decision_audit: services/decision_audit.py가 유일한 writer.
+    # audit_id는 AUTOINCREMENT PK고 자연키(UNIQUE) 제약이 없어 UPSERT 경로 자체가
+    # 없음 - 구조적으로 append-only(INSERT만 가능)가 보장됨. UPDATE/DELETE 문은
+    # services/decision_audit.py에 절대 작성하지 않는다 (append-only 보장의 근거).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tb_decision_audit (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            branch TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            fruit_type TEXT,
+            condition TEXT,
+            c_yolo REAL,
+            defect_type TEXT,
+            position TEXT,
+            tau_yolo REAL,
+            stage1_gate_passed INTEGER,
+            stage2_evsi_gate_passed INTEGER,
+            vlm_called INTEGER,
+            vlm_response TEXT,
+            theta_exists INTEGER,
+            dstored TEXT,
+            evpi_human REAL,
+            cost_human REAL,
+            n_pending INTEGER,
+            tau_hold_sec REAL,
+            query_human INTEGER,
+            final_action TEXT NOT NULL,
+            final_destination TEXT,
+            alpha_before REAL,
+            beta_before REAL,
+            alpha_after REAL,
+            beta_after REAL,
+            actual_label TEXT,
+            session_id TEXT,
+            prior_init_method TEXT,
+            prior_pooled_mean REAL,
+            prior_pooled_sample_size INTEGER
+        );
+    """)
+
     # 초기 마스터 정책 데이터 주입 (데이터가 없을 때만 초기화)
     # 작업자가 아직 아무 자연어 명령도 안 내렸을 때를 대비한 Prior Policy.
     # Priority Rule(Discard > Damaged > Processing > Normal)에서
@@ -118,7 +159,8 @@ def init_db():
     if cursor.fetchone()[0] == 0:
         default_policies = [
             # source가 llm_policy인 행은 위쪽 주석대로 confidence=1.0 고정(확정 규칙)으로 넣어야
-            # decision_planner.decide()가 bayesian_auto_threshold와 무관하게 바로 execute함
+            # services/human_query_gate.compute_p()가 그대로 p=1.0으로 신뢰해 EVPI_human=0이
+            # 되고, Stage3 게이트가 곧장 위험 감수 실행(execute)으로 판정함
             ("apple", "normal", "normal_box", "llm_policy", 1.0),
             ("apple", "mold", "discard_box", "llm_policy", 1.0),
             ("apple", "scratch", "processing_box", "llm_policy", 1.0),

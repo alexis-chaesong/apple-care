@@ -36,6 +36,7 @@ vision_position_dedup_threshold_mm 이내) 큐에 넣지 않음. status가 바�
 position이 유의미하게 다르면 "새 사과"로 취급해 큐에 넣음.
 """
 
+import asyncio
 import logging
 import threading
 import time
@@ -53,7 +54,7 @@ from models import VisionFeatureIn
 logger = logging.getLogger(__name__)
 
 try:
-    from apple_care_msgs.srv import SrvAppleStatus
+    from apple_care_msgs.srv import SrvAppleStatus, SrvCaptureFrame
 except ModuleNotFoundError:
     # vision_ws가 이 프로세스 환경에 build/source 되어 있지 않은 경우.
     # Vision ROS2 폴링(get_apple_status)만 비활성화하고, 나머지 백엔드
@@ -61,6 +62,7 @@ except ModuleNotFoundError:
     # 여기서 서버 전체를 죽이지 않고 경고만 남김 - 실제 비활성화는
     # start_bridge()에서 SrvAppleStatus is None을 보고 처리함
     SrvAppleStatus = None
+    SrvCaptureFrame = None
     logger.warning(
         "apple_care_msgs를 찾을 수 없어 Vision ROS2 폴링을 비활성화합니다. "
         "vision_ws에서 'colcon build --packages-select apple_care_msgs' 후 "
@@ -71,6 +73,11 @@ except ModuleNotFoundError:
 ROS_NODE_NAME = "fastapi_vision_bridge"
 SERVICE_NAME = "get_apple_status"
 SPIN_TIMEOUT_SEC = 0.1
+
+# Track6: condition="unknown"일 때만 온디맨드로 호출되는 이미지 캡처 서비스.
+# 기존 get_apple_status(1Hz 정기 폴링)와 완전히 별개 - 이 서비스는 스스로 타이머를
+# 갖지 않고 request_captured_frame()이 호출될 때만 나간다.
+CAPTURE_FRAME_SERVICE_NAME = "capture_frame"
 
 # "empty" 응답이 몇 번 연속으로 와야 진짜로 물체가 사라졌다고 보고 디바운스를 리셋할지.
 # 1이면 예전 동작(즉시 리셋)과 같음.
@@ -162,6 +169,7 @@ class VisionBridgeManager:
     def __init__(self) -> None:
         self.node: Optional[Node] = None
         self.client = None
+        self.capture_frame_client = None
         self.executor: Optional[SingleThreadedExecutor] = None
         self.ros_thread: Optional[threading.Thread] = None
         self.loop: Optional[AbstractEventLoop] = None
@@ -213,6 +221,15 @@ class VisionBridgeManager:
         self.queue = output_queue
 
         self.client = self.node.create_client(SrvAppleStatus, SERVICE_NAME)
+
+        # Track6: capture_frame 클라이언트도 같은 노드/executor/스레드를 공유한다 -
+        # 이 서비스만을 위해 별도 ROS2 노드를 새로 띄우지 않고, 이미 폴링용으로
+        # 띄워둔 것을 그대로 재사용한다 (get_captured_frame_for_vlm은 vlm_gate.py
+        # 모듈 docstring 참고 - "새로운 방식 만들지 말고" 원칙).
+        if SrvCaptureFrame is not None:
+            self.capture_frame_client = self.node.create_client(
+                SrvCaptureFrame, CAPTURE_FRAME_SERVICE_NAME
+            )
 
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
@@ -299,6 +316,61 @@ class VisionBridgeManager:
             return
         self._skip_position = position
         self._skip_started_at = time.time()
+
+    # ------------------------------------------------------------------
+    # Track6: 온디맨드 이미지 캡처 (condition="unknown"일 때만 services/vlm_gate.py가 호출)
+    # ------------------------------------------------------------------
+    async def request_captured_frame(self, timeout_sec: float) -> Optional[bytes]:
+        """capture_frame 서비스를 1회 호출해서 JPEG로 인코딩된 이미지 바이트를 받아온다.
+
+        기존 get_apple_status 폴링(_poll_once/_on_response)은 "쏘고 잊는(fire-and-
+        forget)" 방식 - call_async() 결과를 콜백에서 받아 큐에 적재만 하고 끝난다.
+        이 함수는 반대로 decide()(FastAPI 이벤트 루프)가 실제 응답을 await해서 값을
+        받아야 하므로, rclpy Future(ROS2 스레드에서 완료됨)를 asyncio.Future로
+        중계한다. call_soon_threadsafe로 스레드 경계를 넘는 방식 자체는
+        robot_bridge.py/이 파일의 다른 콜백들과 동일한 기존 원칙이고, "특정 호출
+        하나의 응답을 await로 기다린다"는 용도로 쓰는 것만 이 프로젝트에서는
+        새롭다(hitl_state_machine.py의 _answer_future와 같은 결의 패턴을 ROS
+        서비스 호출에 적용한 것).
+
+        Returns:
+            성공 시 JPEG 바이트. 서비스 미준비/타임아웃/success=False 등 실패
+            상황은 전부 예외를 던지지 않고 None으로 통일 - 호출부(vlm_gate.py)가
+            "이미지 없음"과 "캡처 실패"를 구분할 필요 없이 동일하게 VLM 스킵
+            폴백으로 처리하면 되게 하기 위함.
+        """
+        if self.capture_frame_client is None or not self.capture_frame_client.service_is_ready():
+            logger.warning("capture_frame 서비스가 준비되지 않음 - 이미지 캡처 스킵")
+            return None
+
+        loop = asyncio.get_running_loop()
+        result_future: asyncio.Future = loop.create_future()
+
+        def _resolve(ros_future) -> None:
+            if result_future.done():
+                return
+            try:
+                result_future.set_result(ros_future.result())
+            except Exception as exc:  # noqa: BLE001
+                result_future.set_exception(exc)
+
+        ros_future = self.capture_frame_client.call_async(SrvCaptureFrame.Request())
+        ros_future.add_done_callback(lambda f: loop.call_soon_threadsafe(_resolve, f))
+
+        try:
+            response = await asyncio.wait_for(result_future, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            logger.warning("capture_frame 서비스 호출 타임아웃(%.1fs)", timeout_sec)
+            return None
+        except Exception:  # noqa: BLE001
+            logger.error("capture_frame 서비스 호출 실패", exc_info=True)
+            return None
+
+        if not response.success:
+            logger.info("capture_frame 서비스가 success=False 응답 (아직 컬러 프레임 없음 등)")
+            return None
+
+        return bytes(response.image_data)
 
     def _on_response(self, future) -> None:
         """서비스 응답 도착 콜백 (ROS2 스레드에서 실행)."""

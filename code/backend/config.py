@@ -138,14 +138,53 @@ class Settings:
     # bayesian_prior_alpha/beta: 처음 보는 fruit_type+condition 조합에 대한
     # 초기 Prior. 1.0/1.0은 "아무 정보도 없다"는 균등 prior(Uniform)를 의미함
 
-    bayesian_auto_threshold: float = field(
-        default_factory=lambda: float(os.getenv("BAYESIAN_AUTO_THRESHOLD", "0.65"))
+    # bayesian_auto_threshold(고정 0.65 임계값)는 Track2/3(services/human_query_gate.py의
+    # 동적 EVPI 게이트)가 완전히 대체하면서 제거됨. services/bayesian_policy.py의
+    # should_ask_human()(이 필드에 의존하던 죽은 코드)도 함께 제거됐다.
+
+    use_hierarchical_prior: bool = field(
+        default_factory=lambda: os.getenv("USE_HIERARCHICAL_PRIOR", "false").lower() == "true"
     )
-    # bayesian_auto_threshold: 이 값을 confidence가 넘어야 다음부터
-    # 사람에게 안 물어보고 자동 처리함.
-    # prior 1.0/1.0에서 사람 피드백 1회 후 confidence = 2/3 ≈ 0.667이 되므로,
-    # "두 번째 피드백부터 자동 처리"가 되려면 threshold가 0.667보다 낮아야 함 -> 0.65로 고정
-    # (0.7이나 0.8로 설정되면 두 번째 피드백에서도 자동 처리가 안 되므로 반드시 0.65 미만 유지)
+    # use_hierarchical_prior: §5.4 계층적 Prior(partial pooling) 사용 여부.
+    # 기본 False로 기존 Beta(1,1) 균등 prior 동작을 그대로 보존한다.
+    # (bayesian_policy.get_or_init_theta가 이 플래그로 분기)
+
+    hierarchical_prior_pseudo_count: float = field(
+        default_factory=lambda: float(os.getenv("HIERARCHICAL_PRIOR_PSEUDO_COUNT", "2.0"))
+    )
+    # hierarchical_prior_pseudo_count: §5.4 계층적 prior의 K(pseudo-count).
+    # "약한 prior" 의도를 지키기 위해 작게 유지 - 사람 피드백 한두 번만으로도
+    # 이 prior가 실제 관측으로 빠르게 압도되어야 한다.
+
+    human_query_cost_k1: float = field(
+        default_factory=lambda: float(os.getenv("HUMAN_QUERY_COST_K1", "1.0"))
+    )
+    human_query_cost_k2: float = field(
+        default_factory=lambda: float(os.getenv("HUMAN_QUERY_COST_K2", "1.0"))
+    )
+    # human_query_cost_k1/k2: §4.3.4 Cost_human(t) = k1*n(t)/(C-n(t)) + k2*tau_hold(t)의
+    # 잠정 상수(placeholder). "Vision·Robot 모듈과의 완전한 물리적 통합 이전에는
+    # 실측 근거가 없으므로 임의값으로 시작하고, 통합 이후 실제 컨베이어 운용
+    # 데이터로 재보정한다" (§4.3.4, §8 Implementation Status 원문)
+
+    vlm_call_timeout_sec: float = field(
+        default_factory=lambda: float(os.getenv("VLM_CALL_TIMEOUT_SECONDS", "10.0"))
+    )
+    # vlm_call_timeout_sec: Track 6 GPT-4o Vision(Stage 2) 호출의 하드 타임아웃.
+    # openai_timeout_sec(텍스트 전용 LLM 호출용)과 별도 값으로 분리한 이유: 이미지
+    # 업로드+멀티모달 추론은 텍스트 전용 호출보다 지연이 크고, 이 호출이 실패해도
+    # unknown은 §4.4에 따라 항상 Stage3로 폴백하므로 넉넉히 잡아도 안전함. 잠정치
+    # (placeholder) - 실측 근거 없음, Vision 이미지 캡처 인터페이스 연동 이후
+    # 실제 응답 시간 데이터로 재보정 필요.
+
+    image_capture_timeout_sec: float = field(
+        default_factory=lambda: float(os.getenv("IMAGE_CAPTURE_TIMEOUT_SECONDS", "3.0"))
+    )
+    # image_capture_timeout_sec: Task1(이미지 캡처 인터페이스) capture_frame ROS2
+    # 서비스 호출의 타임아웃. vlm_call_timeout_sec(실제 GPT-4o 네트워크 호출)과는
+    # 별도 값 - 이쪽은 로컬 카메라 프레임을 즉시 JPEG 인코딩해 돌려주는 것뿐이라
+    # 훨씬 짧아도 충분해야 정상이지만, 아직 실측 근거 없는 잠정치이므로 여유 있게
+    # 3초로 잡음(카메라 노드가 막 뜬 직후 등 일시적 지연 대비).
 
     # -----------------------------
     # VLA Queue 관련 설정
