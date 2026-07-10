@@ -281,6 +281,10 @@ class VisionBridgeManager:
             if time.time() - self._skip_started_at >= SKIP_EXCLUDE_COOLDOWN_SEC:
                 logger.info("스킵 제외 시간(%.0f초) 만료 - 해당 사과를 다시 후보에 포함시킴", SKIP_EXCLUDE_COOLDOWN_SEC)
                 self._skip_position = None
+                # 제외 중에는 obj_detection이 이 사과만 보일 때 (None, None, None)
+                # (=status "empty")를 돌려주므로(yolo.py의 get_best_detection 참고),
+                # 아래 _on_response의 EMPTY_RESET_STREAK 로직이 이미 dedup 캐시를
+                # 초기화해둔 상태다 - 여기서 따로 리셋할 필요 없음.
             else:
                 request.avoid_position = self._skip_position
 

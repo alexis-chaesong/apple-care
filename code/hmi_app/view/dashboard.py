@@ -36,6 +36,11 @@ def _category_to_raw_answer(category: str) -> str:
 
 DESTINATION_TO_CATEGORY = {v: k for k, v in CATEGORY_TO_DESTINATION.items()}
 
+# llm_service.interpret_human_answer()의 few-shot 예시 문구를 그대로 사용 -
+# "skip" destination으로 해석되는 걸 사실상 보장하기 위해 임의 문구 대신
+# 프롬프트에 이미 등록된 정확한 예시 텍스트를 그대로 보낸다.
+HITL_SKIP_RAW_ANSWER = "무시해, 나중에 할게"
+
 
 class VLASorterDashboard:
     # ── iOS 시스템 컬러 기반 라이트 테마 ──────────────────────────
@@ -297,6 +302,24 @@ class VLASorterDashboard:
                 parent=self.hitl_popup if hitl_popup_still_open else self.root,
             )
 
+            if self.hitl_popup is not None:
+                try:
+                    if self.hitl_popup.winfo_exists():
+                        self.hitl_popup.destroy()
+                except tk.TclError:
+                    pass
+                self.hitl_popup = None
+                self.hitl_cam_label = None
+
+        elif msg_type == "HITL_SKIPPED":
+            payload = msg.get("payload", {}) or {}
+            fruit_type = payload.get('fruit_type')
+            self.log_message(
+                f"[HITL_SKIPPED] 보류: {fruit_type} (condition={payload.get('condition')}) - "
+                "정책 학습 없이 다음 사과부터 처리합니다."
+            )
+            # HITL_RESOLVED와 달리 아무것도 확정된 게 없으므로(카운트 미반영,
+            # 정책 미학습) 확인 팝업 없이 조용히 닫기만 한다.
             if self.hitl_popup is not None:
                 try:
                     if self.hitl_popup.winfo_exists():
@@ -1218,37 +1241,25 @@ class VLASorterDashboard:
         if self.current_frame is not None:
             self.render_camera_frame(self.current_frame, self.hitl_cam_label, 360, 240)
 
-        def manual_sort(category):
-            destination = CATEGORY_TO_DESTINATION[category]
-            raw_answer = _category_to_raw_answer(category)
+        def _close_hitl_popup():
+            if self.hitl_popup is not None:
+                try:
+                    if self.hitl_popup.winfo_exists():
+                        self.hitl_popup.destroy()
+                except tk.TclError:
+                    pass
+                self.hitl_popup = None
+                self.hitl_cam_label = None
 
-            # session_id가 없다는 건 사이드바 "작업자 지시 대기 (테스트)" 버튼으로 연 로컬
-            # 테스트 팝업이라는 뜻 (실제 VLA_ASK_HUMAN 이벤트는 항상 session_id를 담아서 옴).
-            # 백엔드에 대응하는 세션이 없어 POST /api/feedback이 항상 409로 실패하므로,
-            # 서버 왕복 없이 즉시 로컬에서 매핑 완료 처리를 해준다.
+        def _submit_raw_answer(raw_answer, log_label):
+            # session_id가 없다는 건 실제 세션이 아니라 로컬 테스트 팝업이라는 뜻
+            # (실제 VLA_ASK_HUMAN 이벤트는 항상 session_id를 담아서 옴). 백엔드에
+            # 대응하는 세션이 없어 POST /api/feedback이 항상 409로 실패하므로,
+            # 서버 왕복 없이 그대로 반환해서 호출부가 로컬 처리를 하게 한다.
             if self.hitl_session_id is None:
-                self.counts[category] = self.counts.get(category, 0) + 1
-                if category in self.count_labels:
-                    self.count_labels[category].config(text=f"{self.counts[category]} 개")
-                self.log_message(f"[HITL Test] '{category}' 선택 -> destination={destination} (테스트 모드, 로컬 처리)")
-                # parent를 hitl_win으로 지정 - hitl_win이 grab_set()으로 입력을
-                # 독점하고 있는 동안 안내 창이 그 뒤에 가려 안 보이는 문제를 막음.
-                messagebox.showinfo(
-                    "매핑 완료",
-                    f"'{self.hitl_fruit_type}'을(를) [{category}]로 매핑 완료했습니다. (테스트 모드)",
-                    parent=hitl_win if hitl_win.winfo_exists() else self.root,
-                )
-                if self.hitl_popup is not None:
-                    try:
-                        if self.hitl_popup.winfo_exists():
-                            self.hitl_popup.destroy()
-                    except tk.TclError:
-                        pass
-                    self.hitl_popup = None
-                    self.hitl_cam_label = None
-                return
+                return False
 
-            self.log_message(f"[HITL] '{category}' 선택 -> raw_answer='{raw_answer}' 전송 중... (destination={destination})")
+            self.log_message(f"[HITL] '{log_label}' 선택 -> raw_answer='{raw_answer}' 전송 중...")
 
             def worker():
                 try:
@@ -1259,9 +1270,9 @@ class VLASorterDashboard:
                         session_id=self.hitl_session_id,
                     )
                     # /api/feedback은 "접수됐다"는 것만 알려줌. 실제 해석/학습 결과는
-                    # backend가 비동기로 처리한 뒤 WS로 HITL_RESOLVED(성공) 또는
-                    # HITL_STUCK(재질문 실패)을 브로드캐스트하므로, 팝업은 여기서 바로
-                    # 닫지 않고 그 이벤트가 올 때(_handle_ws_message)까지 열어둠
+                    # backend가 비동기로 처리한 뒤 WS로 HITL_RESOLVED/HITL_SKIPPED(성공)
+                    # 또는 HITL_STUCK(재질문 실패)을 브로드캐스트하므로, 팝업은 여기서
+                    # 바로 닫지 않고 그 이벤트가 올 때(_handle_ws_message)까지 열어둠
                     def on_success():
                         self.log_message(f"[HITL Submitted] {result} - 처리 결과 대기 중...")
 
@@ -1276,17 +1287,63 @@ class VLASorterDashboard:
                     self.root.after(0, on_error)
 
             threading.Thread(target=worker, daemon=True).start()
+            return True
 
-        btn_box = tk.Frame(left_panel, bg=self.COLOR_BG) 
-        btn_box.pack(fill="x", pady=5) 
+        def manual_sort(category):
+            destination = CATEGORY_TO_DESTINATION[category]
+            raw_answer = _category_to_raw_answer(category)
 
-        colors = {"판매": self.COLOR_GREEN, "못난이": self.COLOR_ORANGE, "가공용": self.COLOR_BLUE, "폐기": self.COLOR_RED} 
-        for cat, color in colors.items(): 
-            btn = tk.Button( 
+            if _submit_raw_answer(raw_answer, category):
+                return
+
+            # 로컬 테스트 모드: 서버 왕복 없이 즉시 매핑 완료 처리
+            self.counts[category] = self.counts.get(category, 0) + 1
+            if category in self.count_labels:
+                self.count_labels[category].config(text=f"{self.counts[category]} 개")
+            self.log_message(f"[HITL Test] '{category}' 선택 -> destination={destination} (테스트 모드, 로컬 처리)")
+            # parent를 hitl_win으로 지정 - hitl_win이 grab_set()으로 입력을
+            # 독점하고 있는 동안 안내 창이 그 뒤에 가려 안 보이는 문제를 막음.
+            messagebox.showinfo(
+                "매핑 완료",
+                f"'{self.hitl_fruit_type}'을(를) [{category}]로 매핑 완료했습니다. (테스트 모드)",
+                parent=hitl_win if hitl_win.winfo_exists() else self.root,
+            )
+            _close_hitl_popup()
+
+        def manual_skip():
+            # 정책 학습도, 박스 이동 결정도 하지 않고 이 사과는 보류한 채 다음
+            # 사과부터 처리하도록 넘어감 (hitl_state_machine.py의
+            # destination=="skip" 분기 - vision_bridge에 좌표만 잠시 제외
+            # 등록하고 세션을 종료함. 완료되면 WS로 HITL_SKIPPED가 옴).
+            if _submit_raw_answer(HITL_SKIP_RAW_ANSWER, "무시"):
+                return
+
+            # 로컬 테스트 모드: 서버 왕복 없이 즉시 종료 (카운트는 증가시키지 않음 -
+            # 아직 아무 분류도 정해지지 않았으므로)
+            self.log_message(f"[HITL Test] '무시' 선택 (테스트 모드, 로컬 처리)")
+            messagebox.showinfo(
+                "무시 처리",
+                f"'{self.hitl_fruit_type}'을(를) 보류하고 다른 사과부터 처리합니다. (테스트 모드)",
+                parent=hitl_win if hitl_win.winfo_exists() else self.root,
+            )
+            _close_hitl_popup()
+
+        btn_box = tk.Frame(left_panel, bg=self.COLOR_BG)
+        btn_box.pack(fill="x", pady=5)
+
+        colors = {"판매": self.COLOR_GREEN, "못난이": self.COLOR_ORANGE, "가공용": self.COLOR_BLUE, "폐기": self.COLOR_RED}
+        for cat, color in colors.items():
+            btn = tk.Button(
                 btn_box, text=cat, bg=color, fg="white", activebackground=color, bd=0, relief="flat",
-                font=self.FONT_BODY_BOLD, width=7, pady=10, cursor="hand2", command=lambda c=cat: manual_sort(c), 
-            ) 
-            btn.pack(side="left", padx=3, expand=True, fill="x") 
+                font=self.FONT_BODY_BOLD, width=7, pady=10, cursor="hand2", command=lambda c=cat: manual_sort(c),
+            )
+            btn.pack(side="left", padx=3, expand=True, fill="x")
+
+        btn_skip = tk.Button(
+            btn_box, text="무시\n(다음 사과)", bg=self.COLOR_TEXT_MUTED, fg="white", activebackground=self.COLOR_TEXT_MUTED,
+            bd=0, relief="flat", font=self.FONT_BODY_BOLD, width=7, pady=10, cursor="hand2", command=manual_skip,
+        )
+        btn_skip.pack(side="left", padx=3, expand=True, fill="x") 
 
     def on_closing(self):
         self.ws_client.stop()

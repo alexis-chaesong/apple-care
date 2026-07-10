@@ -363,11 +363,17 @@ def main(args=None):
         elif command == "MANUAL_PAUSE":
             node.get_logger().info(f"[{TOPIC_ROBOT_COMMAND}] MANUAL_PAUSE 수신 - 다음 사과 집기 전에 일시정지합니다.")
             pause_requested.set()
+        elif command == "HOLD":
+            # 백엔드(hitl_state_machine.py)가 HITL 질문을 시작할 때 표시용으로 보냄.
+            # 별도 처리가 필요 없음 - decision_queue는 답변이 해석되기 전까지
+            # 그 사과의 작업 자체를 받지 않으므로(hitl_state_machine.py가 답변
+            # 전에는 /decision/result를 보내지 않음), 로봇은 이미 구조적으로
+            # 다음 decision이 올 때까지 대기 상태다. 여기서 process_state를
+            # READY 밖으로 바꾸면 오히려 백엔드의 "READY일 때만 새 Vision 판단"
+            # 게이팅(main.py)이 막혀서, 무시(skip) 처리 후 다른 사과를 이어서
+            # 인식해야 하는 흐름이 깨지므로 의도적으로 상태를 건드리지 않는다.
+            node.get_logger().info(f"[{TOPIC_ROBOT_COMMAND}] HOLD 수신 (표시용, decision_queue 대기로 이미 반영됨)")
         else:
-            # HOLD(HITL 질문 중 표시용) 등은 이번 연동 범위 밖 - box_sequence_test.py의
-            # decision_queue는 답변이 해석되기 전까지 그 사과의 작업 자체를 받지 않으므로
-            # (hitl_state_machine.py가 답변 전에는 /decision/result를 보내지 않음),
-            # 로봇이 그 사과를 실수로 먼저 처리하는 일은 이미 구조적으로 없음.
             node.get_logger().warn(f"[{TOPIC_ROBOT_COMMAND}] '{command}' 명령은 아직 처리하지 않습니다.")
 
     comm_node.create_subscription(String, TOPIC_DECISION_RESULT, decision_result_callback, 10)

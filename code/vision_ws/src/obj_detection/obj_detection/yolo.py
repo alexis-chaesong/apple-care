@@ -85,9 +85,15 @@ class AppleStatusModel:
         전달받은 카메라 좌표). resolve_position(box) -> (x,y,z)를 넘겨주면, 이
         좌표가 exclude_position과 exclude_radius_mm(기본 40mm, 사과 반지름보다
         약간 크게) 이내인 후보를 pool에서 뺀 뒤 면적 최대를 고른다. 제외하고 나면
-        후보가 하나도 안 남으면(그 사과 하나만 보이는 상황) 제외를 포기하고 원래
-        pool 그대로 쓴다 - "무시했더니 아무것도 안 보임"이 되는 것보다는 같은
-        사과라도 계속 돌려주는 게 안전함(호출부가 어차피 다시 skip 처리 가능).
+        후보가 하나도 안 남으면(그 사과 하나만 보이는 상황) "아무것도 안 보임"과
+        동일하게 (None, None, None)을 반환한다 - 예전엔 여기서 제외를 포기하고
+        같은 사과를 그대로 돌려줬는데, 그러면 vision_bridge.py의 중복감지 캐시가
+        스킵 전과 완전히 같은 (status, position)을 계속 받아 매번 걸러버려서,
+        스킵 제외 시간이 끝나도 이 사과가 다시는 질문 대상에 오르지 못하고
+        로봇이 영원히 멈춰있는 문제가 있었음. (None, None, None)을 반환하면
+        기존 "empty" 처리 경로(EMPTY_RESET_STREAK)가 그대로 재사용되어, 몇 번의
+        폴링 뒤 자연스럽게 캐시가 초기화되고 제외 시간이 끝나면 다시 정상적으로
+        재감지된다.
 
         반환값: (class_name, confidence, box[x1,y1,x2,y2]) 또는 감지된 게 전혀 없으면
         (None, None, None).
@@ -130,9 +136,9 @@ class AppleStatusModel:
                 dist = sum((a - b) ** 2 for a, b in zip(pos, exclude_position)) ** 0.5
                 return dist > exclude_radius_mm
 
-            filtered = [c for c in pool if _far_enough(c)]
-            if filtered:
-                pool = filtered
+            pool = [c for c in pool if _far_enough(c)]
+            if not pool:
+                return None, None, None
 
         return max(pool, key=lambda c: _box_area(c[2]))
 
