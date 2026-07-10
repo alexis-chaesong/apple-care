@@ -392,6 +392,39 @@ def main(args=None):
             return False
         return getattr(response, f"{box_name}_occupied", False)
 
+    def _query_apple_status(condition):
+        """
+        get_apple_status를 한 번 호출해서 (status, pick_pos_or_None)을 반환하는
+        공용 헬퍼. refresh_pick_pos(그립 실패 후 재시도 직전)와
+        confirm_apple_present_before_pick(집기 시도 자체를 시작하기 전 사전
+        재확인)이 공유해서 씀 - 둘 다 "CAMERA에 서 있는 상태에서 get_apple_status를
+        다시 불러 최신 상태를 본다"는 동일한 동작이라 분리함.
+
+        status는 response.status 그대로("empty"/"unknown"/실제 사과 분류) 반환.
+        pick_pos는 position이 유효(비어있지 않고 전부 0이 아님)할 때만
+        camera_to_base로 변환해서 채우고, 그 외(서비스 호출 실패/depth 측정 실패)는
+        None - 호출부가 "이번 조회로는 위치를 못 얻었다"로 구분해서 처리해야 함.
+        """
+        future = vision_client.call_async(SrvAppleStatus.Request())
+        rclpy.spin_until_future_complete(node, future)
+        response = future.result()
+        if response is None:
+            node.get_logger().error(f"{VISION_SERVICE_NAME} 서비스 호출 실패")
+            return None, None
+
+        position = list(response.position or [])
+        if not position or all(v == 0.0 for v in position):
+            return response.status, None
+
+        camera_pose_at_detection = get_current_posx()[0]
+        depth_offset = _depth_offset_for_condition(condition)
+        bx, by, bz = camera_to_base(position, camera_pose_at_detection, depth_offset_mm=depth_offset)
+        node.get_logger().info(
+            f"Vision 재조회: status={response.status} camera={position} -> "
+            f"base=({bx:.2f}, {by:.2f}, {bz:.2f})"
+        )
+        return response.status, posx(bx, by, bz, *DEFAULT_PICK_ORIENTATION)
+
     def refresh_pick_pos(condition):
         """
         그립 실패 후 재시도 직전에 호출. CAMERA 위치에 서 있는 상태에서
@@ -399,25 +432,43 @@ def main(args=None):
         (사과가 그립 실패 중 살짝 밀렸을 수 있음). 실패(서비스 오류/depth 측정
         실패)하면 None을 반환하고, 호출부는 이전 pick_pos로 그대로 재시도함.
         """
-        future = vision_client.call_async(SrvAppleStatus.Request())
-        rclpy.spin_until_future_complete(node, future)
-        response = future.result()
-        if response is None:
-            node.get_logger().error(f"{VISION_SERVICE_NAME} 서비스 호출 실패 (위치 재획득)")
-            return None
+        _status, pick_pos = _query_apple_status(condition)
+        if pick_pos is None:
+            node.get_logger().warn("위치 재획득 실패 - 서비스 호출 실패 또는 depth 측정 실패(position이 [0,0,0])")
+        return pick_pos
 
-        position = list(response.position or [])
-        if not position or all(v == 0.0 for v in position):
-            node.get_logger().warn("위치 재획득 실패 - depth 측정 실패(position이 [0,0,0])")
-            return None
+    def confirm_apple_present_before_pick(condition):
+        """
+        decision을 실제로 처리하기 시작하기 직전(아직 pick_pos로 출발하지 않고
+        CAMERA에 그대로 서 있는 상태)에 get_apple_status를 한 번 더 호출해서,
+        백엔드가 다수결로 판정을 확정한 시점과 로봇이 실제로 도착하는 시점 사이의
+        시간차 동안 사과가 이미 없어졌는지를 가볍게 재확인한다.
 
-        camera_pose_at_detection = get_current_posx()[0]
-        depth_offset = _depth_offset_for_condition(condition)
-        bx, by, bz = camera_to_base(position, camera_pose_at_detection, depth_offset_mm=depth_offset)
-        node.get_logger().info(
-            f"위치 재획득: camera={position} -> base=({bx:.2f}, {by:.2f}, {bz:.2f})"
-        )
-        return posx(bx, by, bz, *DEFAULT_PICK_ORIENTATION)
+        실측으로 확인된 문제: 이 재확인 없이 decision.pose를 그대로 믿고 바로
+        내려가면, 실제로는 이미 없는 경우(다른 사이클에 먼저 집혔거나 밀려남/
+        vision 오탐)에도 그리퍼를 완전히 닫아보고 반발력이 안 걸릴 때까지 가봐야만
+        (수 초~십수 초) 실패를 알 수 있어서, 매 헛손질마다 이동+파지+재시도+복귀
+        비용이 통째로 낭비됐음. CAMERA에 이미 서 있는 상태라 위치 이동 없이 1초
+        내외만 더 쓰면 되므로 비용 대비 이득이 큼.
+
+        Returns:
+            (True, pick_pos_or_None): 사과가 여전히 있는 것으로 보이거나(status가
+                "empty"가 아님) 서비스 오류/depth 실패로 판단 자체가 안 되는 경우 -
+                두 경우 다 "일단 집기를 시도해야 한다"는 뜻이라 True. pick_pos가
+                None이 아니면 방금 새로 확인한 위치로 갱신해서 쓰고, None이면
+                호출부가 기존 decision.pose 기반 pick_pos를 그대로 써야 함.
+            (False, None): status가 명시적으로 "empty"(카메라에 물체 자체가 안
+                잡힘) - 사과가 이미 없어진 게 거의 확실하므로, 호출부는 집기
+                시도 자체를 건너뛰고 다음 decision으로 넘어가야 함.
+        """
+        status, pick_pos = _query_apple_status(condition)
+        if status == "empty":
+            node.get_logger().warn(
+                "사전 재확인 결과 트레이에 아무것도 안 잡힘(status=empty) - 이미 "
+                "없어진 것으로 판단해 이번 사과는 집기 시도 없이 건너뜁니다."
+            )
+            return False, None
+        return True, pick_pos
 
     set_velx(45, 30)
     set_accx(45, 30)
@@ -713,6 +764,26 @@ def main(args=None):
             )
             status_bus.publish_safety("ERR_PICK", f"{fruit} pick 좌표가 트레이 범위 밖")
             continue
+
+        # 백엔드가 다수결로 이 decision을 확정한 시점과 로봇이 실제로 집기를
+        # 시작하는 지금 이 시점 사이에 시간차가 있어(다른 decision 처리/이동 등),
+        # 그 사이 사과가 이미 없어졌을 수 있음. 아직 CAMERA에 서 있는 지금
+        # get_apple_status를 한 번 더 불러 가볍게 재확인함 - confirm_apple_
+        # present_before_pick 참고. 여기서 걸러지면 이동+파지+재시도까지 가는
+        # 훨씬 비싼 헛손질을 아예 안 하게 됨.
+        still_present, confirmed_pos = confirm_apple_present_before_pick(condition)
+        if not still_present:
+            status_bus.publish_safety("ERR_PICK", f"{fruit} 사전 재확인 결과 이미 없어짐")
+            continue
+        if confirmed_pos is not None:
+            cpx, cpy, _cpz, _cprx, _cpry, _cprz = confirmed_pos
+            if is_within_tray_bounds(cpx, cpy):
+                pick_pos = confirmed_pos
+            else:
+                node.get_logger().warn(
+                    f"사전 재확인 위치(x={cpx:.1f}, y={cpy:.1f})가 트레이 범위 밖이라 "
+                    "무시하고 기존 decision 위치로 진행합니다."
+                )
 
         node.get_logger().info(f"--- 사과: fruit={fruit} destination={destination} -> {box_name} ---")
 
