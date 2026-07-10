@@ -627,6 +627,93 @@ def test_check_and_recover_proceeds_when_hw_safety_stop_check_reports_clear():
     assert any(call[0] == "movel" for call in calls)
 
 
+def test_check_and_recover_resets_hw_safety_stop_after_resume_then_recovers():
+    # 하드웨어 안전정지가 소프트웨어로 복구 가능한 상태(reset_hw_safety_stop=True를
+    # 반환)면, 운영자가 RESUME을 누른 뒤 바로 이어서 물리 복구(lift->home->camera)까지
+    # 진행돼야 하고, 그 뒤에 wait_for_resume을 또 호출해 이중으로 기다리게 하면 안 됨.
+    import threading
+
+    node = _FakeNode()
+    status_bus = _FakeStatusBus()
+    tracker = EstopRecoveryTracker()  # 정상 상태 (RESUME_AT_CAMERA)
+    event = threading.Event()
+    event.set()
+    calls = []
+    get_current_pos, apply_movel = _make_stateful_pos()
+
+    def movel(pos, mod=MOVE_MOD_ABS):
+        calls.append(("movel", pos))
+        apply_movel(pos, mod)
+
+    def wait_for_resume():
+        calls.append(("wait_for_resume",))
+
+    triggered = check_and_recover(
+        node, status_bus, tracker, event,
+        movel=movel,
+        movej=lambda pos: calls.append(("movej", pos)),
+        wait=lambda sec: calls.append(("wait", sec)),
+        check_motion=lambda: False,
+        gripper_open=lambda: calls.append(("gripper_open",)) or True,
+        home_pos="HOME",
+        camera_pos="CAMERA",
+        get_current_pos=get_current_pos,
+        posx_factory=_fake_posx_factory,
+        check_hw_safety_stop=lambda: (True, "SAFE_STOP"),
+        reset_hw_safety_stop=lambda: calls.append(("reset_hw_safety_stop",)) or True,
+        wait_for_resume=wait_for_resume,
+    )
+
+    assert triggered is True
+    assert event.is_set() is False  # 복구가 끝까지 진행됐으므로 clear되어야 함
+    assert calls.count(("wait_for_resume",)) == 1  # 딱 한 번만 대기해야 함(이중 대기 금지)
+    assert ("reset_hw_safety_stop",) in calls
+    # reset이 wait_for_resume 이후에 호출되고, 그 뒤에 실제 복구 이동이 나가야 함
+    reset_idx = calls.index(("reset_hw_safety_stop",))
+    wait_idx = calls.index(("wait_for_resume",))
+    assert wait_idx < reset_idx
+    assert any(call[0] == "movel" for call in calls[reset_idx:])
+    assert status_bus.states[-1] == ("READY", None)
+
+
+def test_check_and_recover_keeps_waiting_when_hw_safety_stop_reset_fails():
+    # reset_hw_safety_stop이 실패하면(예: 아직 EMERGENCY_STOP 버튼이 물리적으로
+    # 눌려있음) 복구 이동을 내보내면 안 되고, emergency_stop_event도 그대로
+    # 걸어둔 채 True를 반환해 다음 루프에서 다시 확인하게 해야 함.
+    import threading
+
+    node = _FakeNode()
+    status_bus = _FakeStatusBus()
+    tracker = EstopRecoveryTracker()
+    event = threading.Event()
+    event.set()
+    calls = []
+
+    def wait_for_resume():
+        calls.append(("wait_for_resume",))
+
+    triggered = check_and_recover(
+        node, status_bus, tracker, event,
+        movel=lambda pos, mod=MOVE_MOD_ABS: calls.append(("movel", pos)),
+        movej=lambda pos: calls.append(("movej", pos)),
+        wait=lambda sec: calls.append(("wait", sec)),
+        check_motion=lambda: False,
+        gripper_open=lambda: calls.append(("gripper_open",)) or True,
+        home_pos="HOME",
+        camera_pos="CAMERA",
+        get_current_pos=_fake_get_current_pos,
+        posx_factory=_fake_posx_factory,
+        check_hw_safety_stop=lambda: (True, "SAFE_STOP"),
+        reset_hw_safety_stop=lambda: calls.append(("reset_hw_safety_stop",)) or False,
+        wait_for_resume=wait_for_resume,
+    )
+
+    assert triggered is True
+    assert event.is_set() is True  # 여전히 하드웨어가 막고 있으므로 걸린 채로 유지
+    assert ("reset_hw_safety_stop",) in calls
+    assert not any(call[0] in ("movel", "movej", "gripper_open") for call in calls)
+
+
 def test_check_and_recover_when_not_holding_skips_origin_and_resumes_at_camera():
     import threading
 

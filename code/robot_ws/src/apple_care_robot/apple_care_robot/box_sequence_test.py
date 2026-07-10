@@ -63,7 +63,7 @@ from apple_care_robot.status_bus import StatusBus
 from apple_care_robot.estop_handler import EstopRecoveryTracker, check_and_recover
 from apple_care_robot.safe_motion import (
     safe_movel, safe_movej, EmergencyStopError, is_controller_in_hardware_safety_stop,
-    get_controller_robot_state, ROBOT_STATE_NAMES,
+    get_controller_robot_state, ROBOT_STATE_NAMES, reset_controller_safety_stop,
 )
 
 ROBOT_ID = "dsr01"
@@ -185,6 +185,15 @@ def main(args=None):
         resume_requested.wait()
         resume_requested.clear()
 
+    # 프론트엔드 "PAUSE ROBOT MOTION" 버튼(/api/robot/pause -> MANUAL_PAUSE)을 위한
+    # 게이트. E-STOP과 달리 물리 복구(상승/홈 이동)가 필요 없는 상황이라 - 그냥
+    # "다음 사과 집기를 새로 시작하지 않고 대기"만 하면 됨. 이미 진행 중인
+    # 이동/파지 한 사이클은 안전하게 끝까지 마친 뒤(중간에 갑자기 멈추면 오히려
+    # 위험할 수 있음), 다음 while 루프 최상단에서만 이 플래그를 확인함.
+    # RESUME 명령(같은 /robot/command 토픽)이 오면 이 일시정지도 함께 풀림 -
+    # 프론트엔드의 PAUSE 버튼이 두 번째 클릭에서 RESUME을 보내도록 되어 있음.
+    pause_requested = threading.Event()
+
     # 이동/힘제어 폴링 루프 안에서 공용으로 쓸 하드웨어 안전정지 조회 콜백.
     # comm_node를 넘기는 이유: stop_motion()과 동일하게 DSR 제어용 메인 node를
     # 여기서 또 spin하면 충돌 위험이 있음 (comm_node는 이미 별도 스레드에서 spin 중).
@@ -275,6 +284,12 @@ def main(args=None):
             # comm_node를 넘기는 이유: stop_motion()과 동일하게 DSR 제어용 메인 node를
             # 여기서 또 spin하면 충돌 위험이 있음 (comm_node는 이미 별도 스레드에서 spin 중).
             check_hw_safety_stop=lambda: is_controller_in_hardware_safety_stop(comm_node),
+            # 하드웨어 안전정지가 SAFE_STOP/SAFE_OFF/RECOVERY류(SetRobotControl.srv
+            # 기준 서비스 호출만으로 STANDBY까지 복구 가능한 상태)일 때, 운영자가
+            # 프론트엔드에서 재개(RESUME)를 눌러 현장 확인을 마치면 로봇 재연결/
+            # 컨트롤러 재부팅 없이 바로 이어서 복구할 수 있도록 함
+            # (estop_handler.check_and_recover의 reset_hw_safety_stop 인자 참고).
+            reset_hw_safety_stop=lambda: reset_controller_safety_stop(comm_node),
             # resume_motion(move_resume)은 더 이상 안 씀 - stop_motion() 기본값이
             # DR_HOLD에서 DR_QSTOP으로 바뀌면서(safe_motion.STOP_MODE_DEFAULT 참고)
             # 애초에 "재개"가 필요한 일시정지 상태를 만들지 않음(auto_dump_robot_pkg와
@@ -319,8 +334,18 @@ def main(args=None):
             # 다음 E-STOP 게이트를 곧바로 통과시키는 일은 없음.
             node.get_logger().info(f"[{TOPIC_ROBOT_COMMAND}] RESUME 수신")
             resume_requested.set()
+            # 프론트엔드 PAUSE 버튼이 두 번째 클릭에서 같은 RESUME 명령을 보내
+            # 일시정지도 풀게 되어 있음 - MANUAL_PAUSE 중이 아니면 그냥 아무 효과
+            # 없는 clear()라 안전함.
+            pause_requested.clear()
+        elif command == "MANUAL_PAUSE":
+            node.get_logger().info(f"[{TOPIC_ROBOT_COMMAND}] MANUAL_PAUSE 수신 - 다음 사과 집기 전에 일시정지합니다.")
+            pause_requested.set()
         else:
-            # HOLD/MANUAL_PAUSE 등 사이클 도중 정지/재개는 이번 연동 범위 밖.
+            # HOLD(HITL 질문 중 표시용) 등은 이번 연동 범위 밖 - box_sequence_test.py의
+            # decision_queue는 답변이 해석되기 전까지 그 사과의 작업 자체를 받지 않으므로
+            # (hitl_state_machine.py가 답변 전에는 /decision/result를 보내지 않음),
+            # 로봇이 그 사과를 실수로 먼저 처리하는 일은 이미 구조적으로 없음.
             node.get_logger().warn(f"[{TOPIC_ROBOT_COMMAND}] '{command}' 명령은 아직 처리하지 않습니다.")
 
     comm_node.create_subscription(String, TOPIC_DECISION_RESULT, decision_result_callback, 10)
@@ -598,6 +623,10 @@ def main(args=None):
     # 무시하도록 게이팅할 수 있음.
     status_bus.set_state("READY")
 
+    # PAUSED -> READY로 되돌아왔을 때 딱 한 번만 로그/상태 전환하기 위한 플래그
+    # (아래 while 루프에서 pause_requested가 풀렸는지 확인할 때 씀).
+    was_paused = False
+
     while rclpy.ok():
         # 사과 사이사이(대기 중)에는 이동/힘제어 폴링 루프 자체가 없어서, 그
         # 안에 있는 hw_safety_watch도 전혀 안 돌고 있음 - 그래서 소프트웨어
@@ -618,6 +647,21 @@ def main(args=None):
         # 없어서 아래 try/except(이동 도중 감지용)로는 못 잡으므로 별도로 확인.
         if recover_from_estop_if_needed():
             continue
+
+        # 프론트엔드 "PAUSE ROBOT MOTION" 버튼(MANUAL_PAUSE) - 이미 진행 중인
+        # 집기/이동 사이클(아래 decision 처리 블록)은 안전하게 끝까지 마치고,
+        # 다음 사과를 새로 시작하기 전인 이 지점(decision_queue.get() 이전)에서만
+        # 대기시킴. RESUME 명령이 오면 robot_command_callback이 pause_requested를
+        # clear()하므로 자동으로 풀림.
+        if pause_requested.is_set():
+            was_paused = True
+            status_bus.set_state("PAUSED")
+            wait(0.5)
+            continue
+        elif was_paused:
+            was_paused = False
+            node.get_logger().info("[PAUSE] 재개(RESUME) 신호를 받아 계속 진행합니다.")
+            status_bus.set_state("READY")
 
         try:
             decision = decision_queue.get(timeout=1.0)

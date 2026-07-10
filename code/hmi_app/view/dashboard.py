@@ -55,6 +55,12 @@ class VLASorterDashboard:
     COLOR_RED = "#FF3B30"         # iOS systemRed
     COLOR_EMERGENCY_BG = "#7A0C0C"  # 진한 알림용 레드 (긴급 상황 강조 유지)
 
+    # E-STOP 오버레이 재개 버튼 라벨. 로봇이 실제로 wait_for_resume()에 들어가기
+    # 전(물리 복구 중)엔 WAITING, PROCESS_STATE="waiting_for_resume"을 받은 뒤엔 READY -
+    # _show_emergency_overlay/_enable_resume_button 참고.
+    BTN_TEXT_RESUME_WAITING = "물리 복구 중 - 잠시만 기다려주세요..."
+    BTN_TEXT_RESUME_READY = "현장 확인 완료 - 재개(RESUME)"
+
     FONT_TITLE = ("NanumGothic", 20, "bold") 
     FONT_SECTION = ("NanumGothic", 13, "bold") 
     FONT_BODY = ("NanumGothic", 11) 
@@ -87,6 +93,7 @@ class VLASorterDashboard:
 
         self.counts = {"판매": 0, "못난이": 0, "가공용": 0, "폐기": 0}
         self.is_estopped = False
+        self.is_paused = False
         self.current_frame = None
 
         # basket_camera/obj_detection 노드가 꺼지거나 죽으면 해당 CAMERA_FRAME이
@@ -126,29 +133,52 @@ class VLASorterDashboard:
         self.create_frames()
         self.show_frame("monitor") 
         
-        self.center_window(1400, 850)
+        actual_w, actual_h = self.center_window(1400, 850)
         # 어떤 해상도로 줄여도 사이드바/카드 텍스트가 겹치거나 잘리지 않도록
         # 화면 구성이 무너지지 않는 최소 크기를 강제한다 (그 아래로는 스크롤/축소 대신
         # 창 자체가 더 안 줄어들게 막는 게 산업용 HMI에서 더 안전한 선택).
-        self.root.minsize(1180, 720)
+        #
+        # 실측으로 확인된 문제: 이 최소 크기(1180x720)를 고정값으로 두면, 화면
+        # 해상도 자체가 그보다 작은 노트북/모니터에서는 창이 화면보다 커지면서
+        # 오른쪽/아래쪽이 화면 밖으로 밀려나 버튼이나 글자가 실제로 안 보이는
+        # 문제가 있었음(Tk의 minsize는 화면 크기와 무관하게 강제되는 하한이라
+        # 화면이 더 작아도 그대로 적용됨). center_window()가 이미 화면 크기에
+        # 맞춰 clamp한 실제 창 크기(actual_w/actual_h)를 넘지 않는 값으로
+        # minsize를 다시 계산해서, 최소 크기가 화면보다 커지는 일이 없게 한다.
+        min_w = min(1180, actual_w)
+        min_h = min(720, actual_h)
+        self.root.minsize(min_w, min_h)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        self.log_message("System initialized. UI navigation elements loaded.") 
+
+        self.log_message("System initialized. UI navigation elements loaded.")
 
     def center_window(self, width=1400, height=850):
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
+        # 요청한 크기가 실제 화면보다 크면(작은 해상도 모니터/노트북), 화면
+        # 크기에 맞춰 줄인다 - 안 그러면 창의 일부(오른쪽/아래쪽 버튼, 글자)가
+        # 화면 밖으로 밀려나서 실제로는 안 보이는 문제가 있었음. taskbar 등을
+        # 고려해 화면 크기보다 살짝 여유(margin)를 둔다.
+        margin_w, margin_h = 40, 80
+        width = min(width, max(screen_width - margin_w, 320))
+        height = min(height, max(screen_height - margin_h, 240))
         x = int((screen_width / 2) - (width / 2))
         y = int((screen_height / 2) - (height / 2))
-        self.root.geometry(f"{width}x{height}+{x}+{y}") 
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        return width, height
 
     def center_popup(self, popup, width=750, height=420):
-        popup.update_idletasks() 
+        popup.update_idletasks()
         screen_width = popup.winfo_screenwidth()
         screen_height = popup.winfo_screenheight()
+        # center_window()와 동일한 이유로, 팝업도 화면보다 커지지 않게 clamp함.
+        margin_w, margin_h = 40, 80
+        width = min(width, max(screen_width - margin_w, 320))
+        height = min(height, max(screen_height - margin_h, 240))
         x = int((screen_width / 2) - (width / 2))
         y = int((screen_height / 2) - (height / 2))
-        popup.geometry(f"{width}x{height}+{x}+{y}") 
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        return width, height
 
     def _card_frame(self, parent, bg=None):
         return tk.Frame( 
@@ -252,9 +282,19 @@ class VLASorterDashboard:
 
             # 매핑 완료를 사람이 직접 확인하도록 안내 창을 띄우고, "확인"을 눌러야
             # 팝업이 닫히게 함 (messagebox.showinfo는 사용자가 닫을 때까지 블로킹됨).
+            #
+            # parent를 안 주면 이 안내 창이 self.root를 기준으로 뜨는데, HITL
+            # 팝업(hitl_win)이 grab_set()으로 입력을 독점하고 있는 동안이라 안내
+            # 창이 그 뒤에 가려서 안 보이는 문제가 있었음(실제로 겪은 문제 - 매핑
+            # 완료를 눌러도 아무 반응이 없는 것처럼 보였음). HITL 팝업을 parent로
+            # 지정하면 그 위(transient)로 확실히 뜬다.
+            hitl_popup_still_open = (
+                self.hitl_popup is not None and self.hitl_popup.winfo_exists()
+            )
             messagebox.showinfo(
                 "매핑 완료",
                 f"'{fruit_type}'을(를) [{category or destination}]로 매핑 완료했습니다.",
+                parent=self.hitl_popup if hitl_popup_still_open else self.root,
             )
 
             if self.hitl_popup is not None:
@@ -285,7 +325,33 @@ class VLASorterDashboard:
             # 다시 보내주므로, 로봇이 이미 자동 재개된 걸 여기서 실시간으로 볼 수 있음
             # (오버레이 화면을 직접 닫아주지는 않음 - 그건 사람이 버튼으로 확인).
             status_text = msg.get("payload", "")
-            if any(k in status_text for k in ["오류", "실패", "emergency", "ERROR"]):
+
+            # 로봇단(estop_handler.check_and_recover)이 자체적으로 정지했을 때
+            # 보내는 상태 문자열들 - "emergency_stop"(정지 직후), "waiting_for_resume"
+            # (물리 복구까지 끝내고 재개 신호 대기 중), "controller_safety_stop:..."
+            # (펜던트 물리 비상정지로 하드웨어 레벨 정지) 세 가지 모두 프론트 E-STOP
+            # 버튼을 누르지 않고도 발생할 수 있음 - 이 경우 오버레이가 안 뜨면
+            # 재개(RESUME) 버튼 자체가 화면 어디에도 없어서 운영자가 재개시킬 방법이
+            # 없었음(실제로 겪은 문제). is_estopped가 아직 아니면 여기서 오버레이를 띄움.
+            if status_text in ("emergency_stop", "waiting_for_resume") or status_text.startswith(
+                "controller_safety_stop"
+            ):
+                self._handle_robot_triggered_estop(status_text)
+
+            if status_text == "waiting_for_resume":
+                # 로봇 쪽이 실제로 wait_for_resume()에 들어가기 직전에만 발행하는
+                # 상태 - 이 시점부터 눌러야 재개 신호가 로봇에 살아서 전달되므로,
+                # 그 전까지 비활성화해뒀던 오버레이 버튼을 여기서 활성화한다
+                # (_show_emergency_overlay/_enable_resume_button 참고).
+                self._enable_resume_button()
+
+            if self.is_estopped:
+                # E-STOP 오버레이가 떠 있는 동안은(위에서 방금 띄웠든, 이전부터
+                # 떠 있었든) 상단 상태 라벨도 항상 위험 색으로 고정 - "waiting_for_resume"
+                # 처럼 위 키워드 목록에 안 걸리는 상태 문자열 때문에 오버레이는 빨간데
+                # 상태 라벨만 회색으로 보이는 불일치를 막기 위함.
+                color = self.COLOR_RED
+            elif any(k in status_text for k in ["오류", "실패", "emergency", "ERROR"]):
                 color = self.COLOR_RED
             elif any(k in status_text for k in ["완료", "RUNNING", "이동", "구동", "MOVING"]):
                 color = self.COLOR_GREEN
@@ -384,12 +450,8 @@ class VLASorterDashboard:
         for text, target, accent_color in menu_defs:
             menu_btn(text, target, accent_color).pack(fill="x", pady=2, padx=8) 
 
-        lbl_div = tk.Frame(self.side_bar, bg=self.COLOR_BORDER, height=1) 
-        lbl_div.pack(fill="x", pady=20, padx=15) 
-
-        self.btn_hitl_wait = self._flat_button(self.side_bar, "작업자 지시\n대기 (테스트)", self.COLOR_ORANGE, "#C76E00", fg="white")
-        self.btn_hitl_wait.configure(height=3, command=self.trigger_hitl_popup) 
-        self.btn_hitl_wait.pack(fill="x", side="bottom", padx=10, pady=(5, 20)) 
+        lbl_div = tk.Frame(self.side_bar, bg=self.COLOR_BORDER, height=1)
+        lbl_div.pack(fill="x", pady=20, padx=15)
 
     def create_frames(self):
         f_monitor = tk.Frame(self.content_area, bg=self.COLOR_BG) 
@@ -846,18 +908,38 @@ class VLASorterDashboard:
         threading.Thread(target=worker, daemon=True).start()
 
     def on_pause_robot(self):
+        # 토글 버튼: 처음 누르면 일시정지(MANUAL_PAUSE), 이미 일시정지 중이면
+        # 같은 버튼을 다시 눌러 재개(RESUME)함 - box_sequence_test.py의
+        # robot_command_callback이 RESUME을 받으면 pause_requested도 함께
+        # clear()하도록 되어 있어서(같은 명령을 재사용), 별도 엔드포인트 없이
+        # 이 버튼 하나로 일시정지/재개를 오갈 수 있음.
         if self.is_estopped:
             return
 
-        self.log_message("[Robot] PAUSE 명령 전송 중...")
+        if self.is_paused:
+            self._send_pause_resume(resume=True)
+        else:
+            self._send_pause_resume(resume=False)
+
+    def _send_pause_resume(self, resume: bool):
+        action_label = "재개(RESUME)" if resume else "일시정지(PAUSE)"
+        self.log_message(f"[Robot] {action_label} 명령 전송 중...")
+        self.btn_main_pause.config(state="disabled")
 
         def worker():
             try:
-                result = client.post_robot_pause()
+                result = client.post_robot_resume() if resume else client.post_robot_pause()
 
                 def on_success():
-                    self.status_label.config(text="SYSTEM STATUS: PAUSED", fg=self.COLOR_ORANGE)
-                    self.log_message(f"[Robot] PAUSE 명령 전송 성공: {result}")
+                    self.is_paused = not resume
+                    if self.is_paused:
+                        self.status_label.config(text="SYSTEM STATUS: PAUSED", fg=self.COLOR_ORANGE)
+                        self.btn_main_pause.config(text="RESUME ROBOT MOTION")
+                    else:
+                        self.status_label.config(text="SYSTEM STATUS: RUNNING", fg=self.COLOR_GREEN)
+                        self.btn_main_pause.config(text="PAUSE ROBOT MOTION")
+                    self.btn_main_pause.config(state="normal")
+                    self.log_message(f"[Robot] {action_label} 명령 전송 성공: {result}")
 
                 self.root.after(0, on_success)
 
@@ -865,27 +947,53 @@ class VLASorterDashboard:
                 error_text = str(exc)
 
                 def on_error():
-                    self.log_message(f"[Robot] PAUSE 명령 전송 실패: {error_text}")
+                    self.btn_main_pause.config(state="normal")
+                    self.log_message(f"[Robot] {action_label} 명령 전송 실패: {error_text}")
                     messagebox.showerror("서버 연결 실패", f"서버와 연결되지 않았습니다.")
 
                 self.root.after(0, on_error)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def emergency_stop(self):
+    def _enter_estop_ui(self, log_text):
+        """
+        E-STOP 화면 잠금(오버레이 표시 + 상단바/상태 라벨 빨간색 전환)만 담당.
+        emergency_stop()(운영자가 직접 프론트 버튼을 눌러 정지시키는 경로)과
+        _handle_robot_triggered_estop()(로봇/백엔드가 스스로 정지해서 알려주는
+        경로) 둘 다 여기를 거치게 해서, "누가 정지시켰든" 오버레이와 재개(RESUME)
+        버튼이 항상 뜨도록 함 - 예전에는 이 UI 잠금이 emergency_stop()(프론트 버튼)
+        안에만 있어서, 로봇이 스스로(하드웨어 인터락/자체 안전정지) 멈춘 경우
+        오버레이 자체가 안 떠서 재개 버튼이 어디에도 없는 문제가 있었음
+        (실제로 겪은 문제 - 재개를 누를 방법이 없어 사이클이 영원히 멈춰있었음).
+        """
+        if self.is_estopped:
+            return
         self.is_estopped = True
-        
+
         # 오리지널 버건디 레드 테마 안전 전환 복구 완료
         self.top_bar.config(bg=self.COLOR_EMERGENCY_BG)
         self.title_label.config(bg=self.COLOR_EMERGENCY_BG, fg="white")
         self.current_tab_lbl.config(bg=self.COLOR_EMERGENCY_BG, fg="#ffccd2")
-        self.status_label.config(text="!!! HARDWARE CRITICAL E-STOPPED !!!", fg=self.COLOR_RED, bg=self.COLOR_EMERGENCY_BG) 
-        
+        self.status_label.config(text="!!! HARDWARE CRITICAL E-STOPPED !!!", fg=self.COLOR_RED, bg=self.COLOR_EMERGENCY_BG)
+
         self.side_bar.config(bg=self.COLOR_SIDEBAR)
-        self.btn_hitl_wait.config(state="disabled")
-        self.log_message("[CRITICAL ERROR] EMERGENCY STOP ACTIVATED. Hardware Interlock triggered.")
+        self.log_message(log_text)
 
         self._show_emergency_overlay()
+
+    def _handle_robot_triggered_estop(self, reason: str):
+        """
+        WebSocket으로 들어온 PROCESS_STATE가 "로봇/백엔드 쪽에서 이미 정지했음"을
+        알리는 경우 호출. 프론트 E-STOP 버튼을 누른 게 아니므로 client.post_robot_estop()은
+        다시 보내지 않고(이미 멈춘 로봇에 중복 정지 명령을 보낼 이유가 없음)
+        화면 잠금/오버레이만 띄운다 - 오버레이의 재개 버튼이 실제 RESUME 경로
+        (client.post_robot_resume())로 이어지므로, 여기서부터도 정상적으로
+        재개할 수 있게 됨.
+        """
+        self._enter_estop_ui(f"[CRITICAL ERROR] 로봇이 자체적으로 비상정지했습니다 ({reason}).")
+
+    def emergency_stop(self):
+        self._enter_estop_ui("[CRITICAL ERROR] EMERGENCY STOP ACTIVATED. Hardware Interlock triggered.")
 
         # 안전 문제이므로 서버 응답을 기다리지 않고 UI는 즉시 잠근다(위 코드).
         # 실제 정지 명령은 별도 스레드로 전송하고, 전송 자체가 실패하면(네트워크 단절 등)
@@ -931,22 +1039,44 @@ class VLASorterDashboard:
         sub_lbl = tk.Label(
             overlay, text=(
                 "로봇은 정지 후 스스로 안전 위치(카메라 위치)로 물러나 대기합니다.\n"
-                "현장 안전을 직접 확인한 뒤 아래 버튼을 누르면, 그때 로봇에 재개(RESUME)\n"
-                "신호가 전달되어 다음 사이클(비전 재탐지)이 다시 시작됩니다."
+                "물리 복구가 끝나면 아래 버튼이 자동으로 활성화됩니다 - 현장 안전을\n"
+                "직접 확인한 뒤 누르면 로봇에 재개(RESUME) 신호가 전달되어 다음\n"
+                "사이클(비전 재탐지)이 다시 시작됩니다."
             ),
             font=self.FONT_BODY_BOLD, fg="#ffccd2", bg=self.COLOR_EMERGENCY_BG, justify="center", wraplength=800
         )
         sub_lbl.place(relx=0.5, rely=0.55, anchor="center")
         overlay.bind("<Configure>", lambda e: sub_lbl.config(wraplength=max(e.width - 80, 240)))
 
+        # 처음엔 비활성 상태로 띄움 - 로봇이 아직 물리 복구(상승->홈->카메라) 중일 수
+        # 있어서, 그 이동이 다 끝나기 전에 눌러버리면 아직 wait_for_resume()을 호출하지도
+        # 않은 로봇 쪽 resume_requested 이벤트가 조기 set()된 뒤 그대로 버려지는 문제가
+        # 있었음(실제로 겪은 문제 - 버튼을 눌러도 로봇이 안 움직임). 로봇이 실제로
+        # wait_for_resume()에 들어가기 직전에만 발행하는 PROCESS_STATE="waiting_for_resume"을
+        # 받았을 때(_enable_resume_button) 비로소 눌러도 의미가 있으므로, 그 전까지는
+        # 버튼 자체를 눌러도 아무 신호가 전달되지 않게 비활성화해둔다.
         btn_resume = tk.Button(
-            overlay, text="현장 확인 완료 - 재개(RESUME)", font=self.FONT_BODY_BOLD, bg=self.COLOR_RED, fg="white",
-            activebackground="white", activeforeground=self.COLOR_EMERGENCY_BG, bd=0, relief="flat", padx=25, pady=12, cursor="hand2", command=self._confirm_and_resume,
+            overlay, text=self.BTN_TEXT_RESUME_WAITING, font=self.FONT_BODY_BOLD, bg=self.COLOR_TEXT_MUTED, fg="white",
+            activebackground="white", activeforeground=self.COLOR_EMERGENCY_BG, bd=0, relief="flat", padx=25, pady=12,
+            cursor="watch", state="disabled", command=self._confirm_and_resume,
         )
         btn_resume.place(relx=0.5, rely=0.68, anchor="center")
         self.btn_emergency_resume = btn_resume
 
         overlay.lift()
+
+    def _enable_resume_button(self):
+        # 로봇 쪽이 물리 복구를 끝내고 실제로 wait_for_resume()에 들어가기 직전에만
+        # 발행하는 PROCESS_STATE="waiting_for_resume"을 받았을 때 호출됨 - 그 전까지
+        # 비활성화해뒀던 재개 버튼을 이제서야 눌러도 되게 활성화한다 (_show_emergency_overlay
+        # 참고). 이미 활성화돼 있거나(중복 수신) 사용자가 이미 눌러 전송 중인 상태
+        # ("재개 신호 전송 중...")면 건드리지 않음.
+        btn = getattr(self, "btn_emergency_resume", None)
+        if btn is None or not btn.winfo_exists():
+            return
+        if btn.cget("text") != self.BTN_TEXT_RESUME_WAITING:
+            return
+        btn.config(state="normal", text=self.BTN_TEXT_RESUME_READY, bg=self.COLOR_RED, cursor="hand2")
 
     def _confirm_and_resume(self):
         # 재개 신호가 실제로 로봇에 전달됐는지 확인하기 전까지는 오버레이를
@@ -974,7 +1104,7 @@ class VLASorterDashboard:
                     self.log_message(f"[Robot] RESUME 명령 전송 실패: {error_text}")
                     messagebox.showerror("서버 연결 실패", "서버와 연결되지 않아 재개 신호를 보내지 못했습니다. 다시 시도해주세요.")
                     if btn is not None and btn.winfo_exists():
-                        btn.config(state="normal", text="현장 확인 완료 - 재개(RESUME)")
+                        btn.config(state="normal", text=self.BTN_TEXT_RESUME_READY)
 
                 self.root.after(0, on_error)
 
@@ -993,7 +1123,12 @@ class VLASorterDashboard:
         self.current_tab_lbl.config(bg=self.COLOR_SIDEBAR, fg=self.COLOR_TEXT_MUTED)
         self.status_label.config(text="SYSTEM STATUS: RUNNING", fg=self.COLOR_GREEN, bg=self.COLOR_SIDEBAR)
 
-        self.btn_hitl_wait.config(state="normal")
+        # 로봇 쪽 robot_command_callback은 RESUME을 받으면 E-STOP 게이트뿐 아니라
+        # MANUAL_PAUSE(pause_requested)도 함께 clear()함 - 그래서 이 재개가 끝나면
+        # 실제로는 일시정지도 같이 풀린 상태이므로, 버튼 라벨도 그에 맞춰 되돌린다.
+        self.is_paused = False
+        self.btn_main_pause.config(text="PAUSE ROBOT MOTION", state="normal")
+
         self.show_frame("monitor")
         self.log_message("[RECOVERY] 재개(RESUME) 신호 전송 완료. 시스템 정상 모니터링 상태로 복귀되었습니다.")
 
@@ -1039,9 +1174,11 @@ class VLASorterDashboard:
             hitl_win.destroy() 
 
         hitl_win.protocol("WM_DELETE_WINDOW", _on_popup_closed)
-        self.center_popup(hitl_win, width=750, height=420)
-        # 팝업을 작게 줄여도 안내문/버튼이 겹치지 않도록 최소 크기 강제
-        hitl_win.minsize(650, 420)
+        popup_w, popup_h = self.center_popup(hitl_win, width=750, height=420)
+        # 팝업을 작게 줄여도 안내문/버튼이 겹치지 않도록 최소 크기 강제하되,
+        # center_window()와 동일한 이유로 실제 화면 크기(popup_w/popup_h로 이미
+        # clamp됨)보다 커지지 않게 함.
+        hitl_win.minsize(min(650, popup_w), min(420, popup_h))
         hitl_win.grab_set()
 
         lbl_alert = tk.Label(hitl_win, text="[WARNING] AI 판단 신뢰도 저하 상황 발생 - 작업자 수동 지시 대기", font=self.FONT_BODY_BOLD, fg=self.COLOR_ORANGE, bg=self.COLOR_BG, pady=10, wraplength=700, justify="center")
@@ -1094,9 +1231,12 @@ class VLASorterDashboard:
                 if category in self.count_labels:
                     self.count_labels[category].config(text=f"{self.counts[category]} 개")
                 self.log_message(f"[HITL Test] '{category}' 선택 -> destination={destination} (테스트 모드, 로컬 처리)")
+                # parent를 hitl_win으로 지정 - hitl_win이 grab_set()으로 입력을
+                # 독점하고 있는 동안 안내 창이 그 뒤에 가려 안 보이는 문제를 막음.
                 messagebox.showinfo(
                     "매핑 완료",
                     f"'{self.hitl_fruit_type}'을(를) [{category}]로 매핑 완료했습니다. (테스트 모드)",
+                    parent=hitl_win if hitl_win.winfo_exists() else self.root,
                 )
                 if self.hitl_popup is not None:
                     try:
