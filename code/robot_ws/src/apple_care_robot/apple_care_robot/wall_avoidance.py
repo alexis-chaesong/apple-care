@@ -77,11 +77,11 @@ TRAY_Y_MAX_MM = 116.98
 WALL_PROXIMITY_MARGIN_MM = 45.0
 
 # 벽 근처 접근 시 수직에서 트레이 중심 방향으로 기울이는 각도(도).
-WALL_APPROACH_TILT_DEG = 15.0
+WALL_APPROACH_TILT_DEG = 10.0
 
 # 대각선 경유점을 pick_pos 대비 트레이 중심 쪽으로 얼마나 옆으로, 얼마나 높이 띄울지(mm).
-WALL_APPROACH_LATERAL_OFFSET_MM = 30.0
-WALL_APPROACH_HOVER_CLEARANCE_MM = 40.0
+WALL_APPROACH_LATERAL_OFFSET_MM = 22.0
+WALL_APPROACH_HOVER_CLEARANCE_MM = 30.0
 
 # 모서리(두 벽에 동시에 WALL_PROXIMITY_MARGIN_MM 이내로 가까움)는 벽 하나만 가까운
 # 경우보다 그리퍼가 움직일 수 있는 여유 공간이 훨씬 좁다. 실측 결과 벽 하나 기준으로
@@ -296,6 +296,19 @@ def compute_wall_aware_approach(pick_pos, posx_factory):
     pick_x = x - tool_y[0] * pick_inset_mm
     pick_y = y - tool_y[1] * pick_inset_mm
     pick_z = z - tool_y[2] * pick_inset_mm
+
+    # 안전장치: DEFAULT_PICK_ORIENTATION이 ZYZ 오일러 특이점에 가깝다는 게 이미
+    # 실측으로 확인된 문제라(docstring 상단 "실측으로 확인된 문제" 참고),
+    # _nearest_zyz_branch로 branch를 골라도 특정 벽 각도 조합에서 tool_y 축이
+    # 예상과 다른 방향을 가리키면 hover_x/y나 pick_x/y가 트레이 밖 엉뚱한 곳으로
+    # 크게 튈 수 있다. 이 조정된 최종 좌표는 box_sequence_test.py의
+    # is_within_tray_bounds() 사전 검사(compute_wall_aware_approach 호출 *전*의
+    # 원본 vision 좌표 기준)를 이미 지난 뒤 여기서 새로 계산되므로 그 검사를
+    # 안 거친 채 그대로 movel 목표가 된다 - 그래서 여기서 한 번 더 확인해서
+    # 벗어났으면 이번 tilt/inset 보정 자체를 포기하고 원래(보정 전) pick_pos로
+    # 직선 접근하도록 안전하게 되돌린다.
+    if not (is_within_tray_bounds(hover_x, hover_y) and is_within_tray_bounds(pick_x, pick_y)):
+        return None, pick_pos
 
     hover_pos = posx_factory(hover_x, hover_y, hover_z, new_rx, new_ry, new_rz)
     tilted_pick_pos = posx_factory(pick_x, pick_y, pick_z, new_rx, new_ry, new_rz)
