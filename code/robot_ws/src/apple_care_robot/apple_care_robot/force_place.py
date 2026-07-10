@@ -42,6 +42,13 @@ FORCE_THRESHOLD = 4        # 힘 변화량 임계값 (N) - 필요시 8~15 사이
 #      실제로 계속 움직이고 있었는지(=아직 안 닿음, 여유를 더 늘려야 함) 아니면
 #      멈춰 있었는데도 STALL 조건을 못 만족했는지(=STALL_Z_EPSILON_MM이 너무
 #      빡빡함)를 구분하면 어느 쪽을 늘려야 할지 더 정확히 알 수 있음.
+#
+# 이 값은 기본(default) 타임아웃일 뿐 - 호출부가 force_controlled_place()에
+# timeout_sec을 넘기면 그 값이 우선한다. 예: box_sequence_test.py는 바스켓
+# occupied라 접근 속도를 낮춘 경우(OCCUPIED_APPROACH_VEL/ACC), 다시 여유(4.5초)
+# 안에 접촉 판정이 못 끝나 작업대로 재배치되는 사례가 실기로 재현되어, 그
+# 상황에서만 3초 더 넉넉한 timeout_sec을 넘긴다 - 기본 속도(비어있는 바스켓)
+# 케이스까지 전부 늘리면 실제로 필요 없는 곳까지 실패 판정이 느려지므로 분리함.
 _TRAVEL_TIME = MAX_DOWN_DISTANCE / DOWN_SPEED_VEL
 TIMEOUT_SEC = _TRAVEL_TIME + 4.5
 
@@ -67,6 +74,7 @@ RELEASE_RETRY_COUNT = 3
 def force_controlled_place(
     node, current_pos, force_threshold=FORCE_THRESHOLD,
     *, emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
+    timeout_sec=TIMEOUT_SEC,
 ):
     """
     현재 위치에서 수직으로 내려가다가 바닥 감지 시 멈추는 함수
@@ -87,6 +95,11 @@ def force_controlled_place(
             안전정지 상태(펜던트 물리 비상정지 버튼)를 감시함 - /robot/command로
             소프트웨어 명령이 안 들어와도 이 구간에서 물리 버튼이 눌리면 감지됨
             (safe_motion.make_hw_safety_watcher 참고). None이면(기본값) 감시하지 않음.
+        timeout_sec: 접촉을 못 찾았을 때 실패로 판정하기까지 기다릴 최대 시간(초).
+            기본값은 모듈 상수 TIMEOUT_SEC. 호출부가 이 하강 직전에 평소보다 느린
+            속도로 접근했다면(예: 바스켓 occupied라 접근을 감속한 경우) 그만큼
+            타임아웃도 늘려서 넘겨야 함 - 그렇지 않으면 실제로는 진행 중인
+            접촉 판정이 여유 부족으로 조기에 "실패"로 처리될 수 있음.
 
     Returns:
         bool: True면 접촉 성공, False면 타임아웃 또는 실패
@@ -161,7 +174,7 @@ def force_controlled_place(
     # 로봇 컨트롤러가 힘/컴플라이언스 제어 상태로 남아있게 되는 안전 문제가 있음.
     try:
         # 4) 실시간 힘 모니터링 루프
-        while time.time() - start_time < TIMEOUT_SEC:
+        while time.time() - start_time < timeout_sec:
             force = get_tool_force(DR_BASE)
 
             if isinstance(force, list) and len(force) >= 3:
@@ -258,6 +271,6 @@ def force_controlled_place(
 
     # 6) 접촉 결과 반환
     if not contact_detected:
-        node.get_logger().warn(f'{TIMEOUT_SEC:.1f}초 동안 박스 접촉에 실패했습니다. 하강을 강제 중단합니다.')
+        node.get_logger().warn(f'{timeout_sec:.1f}초 동안 박스 접촉에 실패했습니다. 하강을 강제 중단합니다.')
 
     return contact_detected

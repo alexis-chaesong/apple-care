@@ -113,18 +113,32 @@ MAX_PICK_ATTEMPTS = 3
 # 적용돼버렸던 문제가 있어서 분리함.
 PLACE_FORCE_START_CLEARANCE_MM = 10
 
+# 바스켓이 occupied로 판단됐을 때 way_pos -> force_start_pos로 접근하는 movel의
+# 속도/가속도. 실측으로 확인된 문제: force_start_pos는 실제 쌓인 사과 높이를 측정한
+# 값이 아니라 PLACE_FORCE_START_CLEARANCE_MM_OCCUPIED(고정 추정 오프셋)일 뿐이라,
+# 더미가 그보다 높으면 force_controlled_place(컴플라이언스 진입)가 시작되기도 전인
+# 이 구간(rigid position-control movel)에서 그대로 사과더미에 부딪혀 충돌 오류로
+# 이어짐 - 바스켓이 비어있을 때는 같은 구간에 아무것도 없어서 기본 순항 속도
+# (set_velx(45,30))로도 문제가 없었지만, occupied일 때는 그대로 쓰면 안 됨.
+# 접근 속도를 낮춰서 예상보다 일찍 걸리는 저항/충돌에 대한 반응 여유와 실제
+# 충돌 시 충격/초과 진입 거리를 줄인다. 기본 순항(45/30)과 최초값(15/15) 중간인
+# 25/20으로 조정. force_start_pos 도달 이후(force_controlled_place의 컴플라이언스
+# 하강 속도, force_place.py의 DOWN_SPEED_VEL/ACC)는 이 값과 무관하게 기존 그대로 둠.
+OCCUPIED_APPROACH_VEL = 25
+OCCUPIED_APPROACH_ACC = 20
+
 # 바스켓에 이미 사과가 있으면(get_basket_status로 조회) 그 위에서 접촉을
 # 감지해야 하므로, 빈 바스켓 기준(10mm)보다 시작 높이 여유를 더 둔다. 아직
 # 실기 튜닝 전 새 기능이라, WORKTABLE_FORCE_START_CLEARANCE_MM(작업대 재배치 -
 # 역시 "바닥이 아니라 뭔가 위에 착지"하는 동일한 상황)과 같은 값을 초깃값으로
 # 사용함 - 실기 테스트 후 조정할 것.
-PLACE_FORCE_START_CLEARANCE_MM_OCCUPIED = 30
+PLACE_FORCE_START_CLEARANCE_MM_OCCUPIED = 70
 
 # place_apple_back_on_worktable 전용 힘제어 시작 높이 클리어런스(mm). 박스 배치와
 # 달리 아직 실기로 튜닝된 적 없는 새 기능이라, PLACE_FORCE_START_CLEARANCE_MM의
 # 박스 전용 튜닝(10mm)에 영향받지 않도록 원래 값(30mm)을 그대로 씀 - 실기 테스트
 # 후 필요하면 이 값만 따로 조정할 것.
-WORKTABLE_FORCE_START_CLEARANCE_MM = 30
+WORKTABLE_FORCE_START_CLEARANCE_MM = 60
 
 
 def main(args=None):
@@ -145,7 +159,15 @@ def main(args=None):
         amovel, amovej, check_motion, DR_BASE,
         DR_MV_MOD_ABS, DR_MV_MOD_REL,
     )
-    from apple_care_robot.force_place import force_controlled_place
+    from apple_care_robot.force_place import force_controlled_place, TIMEOUT_SEC as BASE_PLACE_TIMEOUT_SEC
+
+    # 바스켓 occupied라 접근 속도를 낮춘 경우(OCCUPIED_APPROACH_VEL/ACC) 전용
+    # 힘제어 타임아웃. 기본 타임아웃(BASE_PLACE_TIMEOUT_SEC)을 그대로 쓰면 감속
+    # 접근 때문에 실기에서 접촉 판정 여유(4.5초) 안에 못 끝나 작업대로 재배치되는
+    # 사례가 재현됨 - 이 케이스에만 3초 더 넉넉하게 줌. 비어있는 바스켓(기본 속도)
+    # 배치나 작업대 재배치까지 전부 늘리면 실제로 필요 없는 곳까지 실패 판정이
+    # 느려지므로 occupied일 때만 force_controlled_place에 넘긴다.
+    OCCUPIED_PLACE_TIMEOUT_SEC = BASE_PLACE_TIMEOUT_SEC + 3.0
 
     # 좌표 정의
     HOME = posj(0, 0, 90, 0, 90, 0)
@@ -377,12 +399,21 @@ def main(args=None):
     # "빈 바스켓" 기본값으로 계속 동작해야 하기 때문 (is_basket_occupied 참고).
     basket_client = node.create_client(SrvBasketStatus, BASKET_SERVICE_NAME)
 
+    # 로그 표시용 - DESTINATION_TO_BOX(위 주석)에 적힌 실제 물리 배치와 동일:
+    # b1=가공용, b2=못난이, b3=정상, b4=폐기.
+    BOX_DISPLAY_NAMES = {"b1": "가공용", "b2": "못난이", "b3": "정상", "b4": "폐기"}
+
     def is_basket_occupied(box_name: str) -> bool:
         """box_name(b1..b4)의 최신 점유 상태를 get_basket_status로 조회.
 
         서비스가 아직 준비 안 됐거나(backend 미기동) 응답이 valid=False(아직
         /basket_status를 한 번도 못 받은 상태)면 '비어있음'으로 간주한다 -
-        기본 동작(기존과 동일한 빈 바스켓 로직)으로 안전하게 폴백하기 위함."""
+        기본 동작(기존과 동일한 빈 바스켓 로직)으로 안전하게 폴백하기 위함.
+
+        조회에 성공하면(valid=True) box_name 하나만 보고 끝내지 않고, 세컨
+        카메라가 이번에 확인한 b1~b4 전체 상태를 로그로 남긴다 - 지금 놓으려는
+        박스뿐 아니라 다른 박스 상태도 운영 중에 눈으로 바로 확인할 수 있게 하기
+        위함."""
         if not basket_client.service_is_ready():
             return False
         future = basket_client.call_async(SrvBasketStatus.Request())
@@ -390,7 +421,18 @@ def main(args=None):
         response = future.result()
         if response is None or not response.valid:
             return False
-        return getattr(response, f"{box_name}_occupied", False)
+
+        statuses = {
+            name: getattr(response, f"{name}_occupied", False) for name in BOX_DISPLAY_NAMES
+        }
+        node.get_logger().info(
+            "세컨 카메라 바스켓 점유 확인: " + ", ".join(
+                f"{name}({BOX_DISPLAY_NAMES.get(name, name)})="
+                f"{'사과 있음' if occ else '비어있음'}"
+                for name, occ in statuses.items()
+            )
+        )
+        return statuses[box_name]
 
     def _query_apple_status(condition):
         """
@@ -556,28 +598,44 @@ def main(args=None):
         do_safe_movej(HOME)
         wait(0.3)
 
-        node.get_logger().info(f"Move to way point before {name}")
-        do_safe_movel(way_pos)
-        wait(0.3)
-
+        # 경유점(way_pos)으로 출발하기 전에 미리 점유 상태를 확인해둔다 - 이후
+        # way_pos -> force_start_pos 접근 속도(occupied면 감속)와 힘제어 시작
+        # 높이(clearance)를 정하는 데 필요한 값이라, 도착 후가 아니라 출발 전에
+        # 알고 있어야 그 다음 이동부터 바로 반영할 수 있다.
         occupied = is_basket_occupied(name)
         clearance = (
             PLACE_FORCE_START_CLEARANCE_MM_OCCUPIED if occupied else PLACE_FORCE_START_CLEARANCE_MM
         )
         node.get_logger().info(
             f"{name} 바스켓 상태: {'사과 있음' if occupied else '비어있음(기본)'} "
-            f"(힘제어 시작 높이: box_pos + {clearance}mm)"
+            f"(힘제어 시작 높이: box_pos + {clearance}mm"
+            + (f", 접근 속도 저감: vel={OCCUPIED_APPROACH_VEL} acc={OCCUPIED_APPROACH_ACC})" if occupied else ")")
         )
+
+        node.get_logger().info(f"Move to way point before {name}")
+        do_safe_movel(way_pos)
+        wait(0.3)
+
         box_x, box_y, box_z, box_rx, box_ry, box_rz = box_pos
         force_start_pos = posx(
             box_x, box_y, box_z + clearance, box_rx, box_ry, box_rz
         )
-        do_safe_movel(force_start_pos)
+        # occupied면 clearance(30mm)가 실측이 아닌 추정 오프셋이라, 실제 더미가
+        # 더 높을 때 force_controlled_place(컴플라이언스)가 시작되기 전인 이
+        # rigid movel 구간에서 충돌할 수 있음 - 접근 속도를 낮춰서 대응 여유를 둠
+        # (OCCUPIED_APPROACH_VEL/ACC 주석 참고). 비어있으면 기존과 동일하게
+        # 기본 순항 속도(vel/acc=None -> set_velx/set_accx 전역값)로 접근.
+        do_safe_movel(
+            force_start_pos,
+            vel=OCCUPIED_APPROACH_VEL if occupied else None,
+            acc=OCCUPIED_APPROACH_ACC if occupied else None,
+        )
         wait(0.3)
         contact_ok = force_controlled_place(
             node, force_start_pos,
             emergency_stop_event=emergency_stop, stop_node=comm_node,
             check_hw_safety_stop=check_hw_safety_stop,
+            timeout_sec=OCCUPIED_PLACE_TIMEOUT_SEC if occupied else BASE_PLACE_TIMEOUT_SEC,
         )
 
         status_bus.set_motion("PLACING", name)
