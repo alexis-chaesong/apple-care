@@ -144,8 +144,22 @@ class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayM
         self.get_logger().info("ObjectDetectionNode initialized.")
 
     def handle_get_status(self, request, response):
-        """카메라에 보이는 사과 상태를 판정해서 반환한다."""
-        label, score, box = self.model.get_best_detection(self.img_node)
+        """카메라에 보이는 사과 상태를 판정해서 반환한다.
+
+        request.avoid_position: 백엔드가 HITL "무시" 응답을 받은 사과의 카메라
+        좌표를 실어 보내면, 그 좌표 근처(exclude_radius_mm 이내) 후보는 이번
+        선택에서 제외하고 그 다음으로 큰 사과를 돌려준다 (같은 사과가 계속
+        재질문되지 않고 다른 사과 먼저 처리되게 하기 위함 - yolo.py의
+        get_best_detection 참고).
+        """
+        avoid_position = list(request.avoid_position) if request.avoid_position else None
+        label, score, box = self.model.get_best_detection(
+            self.img_node,
+            exclude_position=avoid_position,
+            resolve_position=lambda b: self._compute_position(
+                *map(int, [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2])
+            ),
+        )
         depth_frame = self.img_node.get_depth_frame()
 
         # 뎁스 디버그 창에 "왜 이렇게 판단했는지" 그대로 그려주기 위한 진단 정보.
@@ -206,9 +220,18 @@ class ObjectDetectionNode(DepthAnalysisMixin, SizeClassifierMixin, DebugOverlayM
         if box is None:
             # 박스가 없거나(원래 없었거나 높이 차이 검증에서 탈락) -> YOLO는 놓쳤어도
             # depth만으로 "배경보다 튀어나온 덩어리"를 찾아 위치까지 추정해본다.
-            unknown_position = self._find_unknown_object_position(depth_frame)
-            if unknown_position is not None:
-                self.get_logger().info("No valid box, but depth shows an object -> unknown")
+            # (_find_unknown_blob이 UNKNOWN_BLOB_MIN_HEIGHT_MM 미만인 얕은 블롭은
+            # 이미 노이즈로 걸러내므로, 여기 도달한 블롭은 실제 물체로 확정된 것임)
+            unknown_blob = self._find_unknown_blob(depth_frame)
+            if unknown_blob is not None:
+                unknown_position = self._pixel_to_camera_coords(
+                    *unknown_blob['centroid'], unknown_blob['depth_mm']
+                )
+                self.get_logger().info(
+                    "No valid box, but depth shows an object -> unknown "
+                    f"(근거: 배경 대비 {unknown_blob['height_diff_mm']:.0f}mm 튀어나옴, "
+                    f"면적 {unknown_blob['area']}px, position={tuple(round(v, 1) for v in unknown_position)})"
+                )
                 response.status = "unknown"
                 response.confidence = 0.0
                 response.position = [float(v) for v in unknown_position]

@@ -5,12 +5,18 @@ test_vision_service_server.py
 get_apple_status 서비스 서버.
 
 아래 5단계 시퀀스를 순서대로(끝나면 처음부터 반복) 응답해서, vision_bridge.py의
-디바운스 로직과 전체 파이프라인을 단계별로 검증할 수 있게 함:
+다수결 확정(CONFIRM_SAMPLE_COUNT=10) + 디바운스 로직과 전체 파이프라인을 단계별로
+검증할 수 있게 함. vision_bridge.py가 같은 물체로 보이는 폴링을 10개 모아 다수결로
+확정한 뒤에만 큐에 넣도록 바뀌었으므로, 각 스테이지 반복 횟수를 10개를 확실히
+채우고도 여유가 남게 잡음(그래야 다수결 확정 + 그 다음 디바운스까지 한 스테이지
+안에서 같이 확인됨):
 
-  1) apple_normal, 같은 position 3번 연속 -> vision_queue에는 1번만 들어가야 정상
-  2) apple_normal, 다른 position 3번 연속 -> "새 사과"로 인식해서 다시 1번 들어가야 정상
-  3) unknown, 같은 position 여러 번 연속 -> 최초 1번만 HITL 세션 시작, 이후는 디바운스
-  4) empty 여러 번 -> 디바운스 상태 리셋 (물체 없음)
+  1) apple_normal, 같은 position 12번 연속 -> 10개째에 다수결 확정돼 vision_queue에
+     1번만 들어가야 정상 (11~12번째는 확정 직후 새 창을 채우기 시작할 뿐 재확정 안 됨)
+  2) apple_normal, 다른 position 12번 연속 -> "새 사과"로 인식해서 다시 1번 들어가야 정상
+  3) unknown, 같은 position 여러 번 연속 -> 10개째에 다수결로 unknown 확정돼 최초
+     1번만 HITL 세션 시작, 이후는 디바운스
+  4) empty 여러 번 -> 디바운스 상태 + 샘플 창 리셋 (물체 없음)
   5) apple_damaged, 새 position -> empty 이후라 "새 사과"로 다시 큐에 들어가야 정상
 
 사용법:
@@ -27,11 +33,11 @@ SERVICE_NAME = "get_apple_status"
 
 # (status, confidence, position, 이 상태를 몇 번 연속 응답할지)
 STAGES = [
-    ("apple_normal", 0.92, [100.0, 100.0, 300.0], 3),   # 동일 position 3연속 -> dedup 확인
-    ("apple_normal", 0.90, [300.0, 300.0, 300.0], 3),   # 다른 position -> 새 사과 확인
+    ("apple_normal", 0.92, [100.0, 100.0, 300.0], 12),  # 10개째 다수결 확정 -> dedup 확인
+    ("apple_normal", 0.90, [300.0, 300.0, 300.0], 12),  # 다른 position -> 새 사과 확인
     ("unknown", 0.35, [500.0, 500.0, 300.0], 20),       # 충분히 오래 유지 -> HITL 세션 확인
     ("empty", 0.0, [], 5),                              # 물체 없음 -> 디바운스 리셋 확인
-    ("apple_damaged", 0.85, [700.0, 700.0, 300.0], 3),  # empty 이후 새 사과 확인
+    ("apple_damaged", 0.85, [700.0, 700.0, 300.0], 12), # empty 이후 새 사과 확인
 ]
 
 _TOTAL_TICKS = sum(count for _, _, _, count in STAGES)

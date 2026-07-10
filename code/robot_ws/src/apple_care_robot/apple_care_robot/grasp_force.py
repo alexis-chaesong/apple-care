@@ -49,12 +49,23 @@ SAFETY_MARGIN_STEPS = 2         # 안전 여유분 단계 수 (2단계 = +100, F
 REACTIVE_CONTACT_FORCE_THRESHOLD_N = 10.0  # 하강 중 이 값(N) 이상 반발력이 튀면 "의도치 않은 접촉"으로 판단
 RETREAT_LIFT_MM = 30            # 접촉 감지 시 베이스 기준 +Z로 후퇴하는 거리(mm) - 사용자 지정값
 MAX_DESCENT_RETRIES = 2         # 후퇴 후 재시도 최대 횟수 (다 써도 실패하면 호출부의 그립 재시도에 맡김)
-DESCENT_POLL_SEC = 0.02
+DESCENT_POLL_SEC = 0.01         # safe_motion._wait_until_motion_done과 동일한 최소 폴링 간격으로 반응성 최대화
+
+# 실측으로 확인된 문제: 기본 속도(box_sequence_test.py가 set_velx(45,30)으로
+# 전역 설정한 값)로 그대로 내려가면, 겹친 사과에 부딪혔을 때 우리 소프트웨어
+# 폴링 루프(get_tool_force 서비스 호출 포함, 매 tick DESCENT_POLL_SEC)가 반응하기도
+# 전에 두산 컨트롤러 자체의 하드웨어 레벨 안전정지(관절 토크 한계)가 먼저
+# 걸려버림 - 소프트웨어가 이기는 경쟁이 아니라 지는 경쟁이었음. force_place.py가
+# 접촉 감지용 하강에 전역 속도보다 느린 DOWN_SPEED_VEL/ACC(30/25)를 쓰는 것과
+# 동일한 이유로, 이 마지막 접근 구간만 그보다 느리게 내려가서 충돌 시 반발력이
+# 천천히 쌓이게 해 우리 폴링이 하드웨어 안전정지보다 먼저 감지/후퇴할 시간을 번다.
+PICK_DESCENT_VEL = 30
+PICK_DESCENT_ACC = 25
 
 
 def descend_to_pick_with_reaction_guard(
     node, pick_pos, *, emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
-    vel=None, acc=None,
+    vel=PICK_DESCENT_VEL, acc=PICK_DESCENT_ACC,
 ):
     """
     pick_pos로 하강하되, 도착 전에 반발력이 튀면(=옆에 겹쳐 있던 다른 사과를
@@ -70,7 +81,9 @@ def descend_to_pick_with_reaction_guard(
         pick_pos: 최종 grasp 목표 위치 (posx 값).
         emergency_stop_event/stop_node/check_hw_safety_stop: safe_motion.safe_movel과
             동일한 의미 - 하강 중에도 소프트웨어/하드웨어 비상정지를 감시함.
-        vel/acc: 하강 속도/가속도 (None이면 컨트롤러 기본값).
+        vel/acc: 하강 속도/가속도. 기본값(PICK_DESCENT_VEL/ACC=30/25)은 전역
+            속도(45/30)보다 의도적으로 느림 - 위 모듈 docstring 참고
+            (반발력이 천천히 쌓여야 하드웨어 안전정지보다 먼저 우리가 감지할 수 있음).
 
     Returns:
         bool: True면 pick_pos에 정상 도착. False면 재시도(MAX_DESCENT_RETRIES회)를
@@ -192,12 +205,17 @@ def grasp_apple_with_force_feedback(
         check_hw_safety_stop if emergency_stop_event is not None else None,
     )
 
-    current_force = initial_force
-    gripper_close_with_force(current_force)
-
+    # 그리퍼를 닫기 전, 아직 열려 있는 상태(force_place.py의 baseline 샘플링과
+    # 동일한 원리)에서 먼저 기준 반발력을 측정한다. 닫은 뒤에 측정하면 초기 힘
+    # (initial_force)으로 이미 눌린 상태가 "기준(0)"으로 잡혀서, 그 이후 필요한
+    # 변동량(GRASP_FORCE_THRESHOLD)을 채우려면 이미 눌린 위에 힘을 계속 더
+    # 올리게 되어 작고 무른 사과를 과도하게 짓누르는 문제가 있었음.
     baseline = get_tool_force(DR_BASE)
     baseline_fz = baseline[2] if isinstance(baseline, list) and len(baseline) >= 3 else 0.0
-    node.get_logger().info(f'[grasp] 기준 반발력: {baseline_fz:.2f}N (초기 힘={current_force})')
+    node.get_logger().info(f'[grasp] 기준 반발력: {baseline_fz:.2f}N (닫기 전, 초기 힘={initial_force})')
+
+    current_force = initial_force
+    gripper_close_with_force(current_force)
 
     for _ in range(MAX_GRASP_STEPS):
         if emergency_stop_event is not None:

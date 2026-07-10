@@ -134,6 +134,57 @@ def should_ask_human(fruit_type: str, condition: str) -> bool:
     return policy["confidence"] < settings.bayesian_auto_threshold
 
 
+def delete_policy(fruit_type: str, condition: str) -> bool:
+    """
+    특정 fruit_type+condition 정책을 완전히 삭제해 "아직 한 번도 안 배운 상태"로
+    되돌린다. 다음에 이 조합이 나오면 get_policy()가 None을 반환하므로
+    decision_planner.decide()가 다시 ask_human으로 처리하고, 그 답변부터 alpha/beta가
+    새로 시작된다.
+
+    record_human_feedback()의 학습 구조상, 처음 답변 한 번만으로 confidence가
+    bayesian_auto_threshold를 넘어 자동 실행으로 넘어가버리면 그 뒤로는 다시
+    안 물어보므로(잘못된 답이었어도) 자연스럽게 정정될 기회가 없다 - 이 함수가
+    그런 경우 정책을 원점으로 되돌리는 유일한 방법이다 (POST /api/policy/command로
+    명시적 규칙을 덮어쓰는 것과는 달리, "확정 규칙을 새로 심는다"가 아니라
+    "아예 모른다"로 되돌림).
+
+    Returns:
+        bool: 실제로 삭제된 행이 있었으면 True (애초에 없던 조합이면 False)
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM tb_policy_memory WHERE fruit_type = ? AND condition = ?",
+            (fruit_type, condition),
+        )
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
+def reset_all_policies() -> int:
+    """
+    tb_policy_memory 전체를 비워 모든 조합을 "아직 한 번도 안 배운 상태"로
+    되돌린다. 되돌릴 수 없는 작업이므로 호출부(라우터)가 명시적 확인을 받은
+    뒤에만 호출해야 한다.
+
+    Returns:
+        int: 삭제된 행 수
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tb_policy_memory")
+        count = cursor.rowcount
+        conn.commit()
+        return count
+    finally:
+        conn.close()
+
+
 def record_human_feedback(
     fruit_type: str,
     condition: str,
