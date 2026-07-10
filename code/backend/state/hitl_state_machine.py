@@ -432,7 +432,14 @@ class HITLStateMachine:
             logger.error("STT 리스닝 중 예외 발생", exc_info=True)
 
     async def _start_next_pending(self) -> None:
-        """현재 세션이 끝난 뒤, 대기열에 쌓인 다음 ask_human 요청을 이어서 시작"""
+        """현재 세션이 끝난 뒤, 대기열에 쌓인 다음 ask_human 요청을 이어서 시작.
+
+        곧바로 시작하지 않고 hitl_batch_grace_sec만큼 기다렸다가 시작함 - 방금
+        세션에 답하거나 지켜보던 관리자가 화면에서 눈을 뗄 여유도 없이 바로 다음
+        질문의 재질문 카운트다운이 시작되면 타이밍을 놓쳐 STUCK에 빠지기 쉬움
+        (실제로 겪은 문제). _current를 먼저 채워서 그 사이 들어오는 새 ask_human
+        요청은 여전히 정상적으로 대기열 뒤에 쌓이게 함.
+        """
         async with self._lock:
             if not self._pending or self._current is not None:
                 return
@@ -441,6 +448,10 @@ class HITLStateMachine:
                 fruit_type=fruit_type, condition=condition, vision_confidence=confidence,
                 position=position,
             )
+
+        if settings.hitl_batch_grace_sec > 0:
+            await asyncio.sleep(settings.hitl_batch_grace_sec)
+
         asyncio.create_task(self._run_session())
 
 

@@ -58,10 +58,10 @@ BASKET_NAMES = ["b1", "b2", "b3", "b4"]
 # /basket_status로 나가는 JSON 키(b1..b4)는 로봇/백엔드가 그대로 쓰고 있으므로
 # 여기서는 건드리지 않고, 디버그 오버레이 표시에만 쓴다.
 BASKET_DISPLAY_NAMES = {
-    "b1": "basket_a_s",
-    "b2": "basket_a_d",
-    "b3": "basket_a_n",
-    "b4": "basket_a_r",
+    "b1": "small",
+    "b2": "damaged",
+    "b3": "normal",
+    "b4": "rotten",
 }
 
 APPLE_LABELS = {"apple_normal", "apple_rotten", "apple_damaged"}

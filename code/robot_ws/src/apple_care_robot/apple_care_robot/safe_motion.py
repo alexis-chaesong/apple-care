@@ -186,6 +186,19 @@ def stop_motion(node, stop_mode: int = STOP_MODE_DEFAULT) -> bool:
 
     Returns:
         bool: 정지 명령이 성공적으로 전달됐으면 True.
+
+    주의 - "찾았지만 거절당함" vs "아예 못 찾음" 구분:
+        dsr_controller2.cpp의 move_stop 콜백은 `res->success = Drfl->stop(...)`인데,
+        Drfl->stop()은 "지금 멈출 동작이 아무것도 없으면" false를 반환한다 - 즉
+        SAFE_STOP/SAFE_OFF처럼 하드웨어가 이미 로봇을 멈춰놓은 상태에서 뒤늦게
+        move_stop을 호출하면, 서비스는 정상적으로 찾고 호출도 됐는데 "멈출 대상이
+        없어서" success=False로 응답하는 게 정상이다(로봇은 이미 안전하게 멈춰있음).
+        이 경우 실제로 정확한 서비스를 찾은 것이므로, 응답이 실패여도 나머지
+        이름 후보를 계속 시도할 필요가 없다(다른 후보는 애초에 존재하지 않는
+        이름이라 시간만 버림) - future.result()가 왔다는 것 자체가 "이 이름이
+        맞다"는 증거이기 때문. 그래서 응답을 받은 순간(성공/실패 무관) 루프를
+        끝내고, 응답 자체를 못 받은 경우(서비스가 진짜 없거나 타임아웃)만 다음
+        후보로 넘어간다.
     """
     service_names = (
         f"/{node.get_namespace().strip('/')}/dsr_controller2/motion/move_stop",  # 최신 드라이버
@@ -208,18 +221,28 @@ def stop_motion(node, stop_mode: int = STOP_MODE_DEFAULT) -> bool:
         rclpy.spin_until_future_complete(node, future, timeout_sec=0.8)
 
         result = future.result() if future.done() else None
-        if result is not None and result.success:
+        if result is None:
+            # 이 이름으로는 응답 자체를 못 받음(타임아웃 등) - 진짜로 이 후보가
+            # 아닐 수 있으니 다음 후보를 시도.
+            continue
+
+        if result.success:
             node.get_logger().warning(
                 f"[safe_motion] 정지 성공: service={service_name}, stop_mode={stop_mode}"
             )
-            return True
-
-        node.get_logger().error(
-            f"[safe_motion] 정지 응답 실패: service={service_name}, stop_mode={stop_mode}"
-        )
+        else:
+            # 응답을 받았다는 것 자체가 이 서비스 이름이 맞다는 뜻 - 실패는 보통
+            # "이미 멈출 동작이 없음"(하드웨어 안전정지가 먼저 걸린 경우 등)이라
+            # 위험 신호가 아니므로 error가 아닌 warning으로 남김.
+            node.get_logger().warning(
+                f"[safe_motion] 정지 명령이 거절됨(service={service_name}, "
+                f"stop_mode={stop_mode}) - 이미 멈출 동작이 없는 상태(하드웨어 "
+                "안전정지가 먼저 걸린 경우 등)일 가능성이 높아 무시해도 됨."
+            )
+        return result.success
 
     node.get_logger().error(
-        f"[safe_motion] motion/move_stop 서비스를 찾지 못했거나 호출에 실패했습니다: {service_names}"
+        f"[safe_motion] motion/move_stop 서비스를 찾지 못했습니다: {service_names}"
     )
     return False
 
