@@ -57,11 +57,16 @@ BASKET_NAMES = ["b1", "b2", "b3", "b4"]
 # 디버그 오버레이에 b1~b4와 함께 보여줄 표시 이름 (사용자 지정값).
 # /basket_status로 나가는 JSON 키(b1..b4)는 로봇/백엔드가 그대로 쓰고 있으므로
 # 여기서는 건드리지 않고, 디버그 오버레이 표시에만 쓴다.
+#
+# 실측으로 확인된 문제: 이 표시 이름이 실제 물리 배치(box_sequence_test.py의
+# DESTINATION_TO_BOX, "b1=가공용, b2=못난이, b3=정상, b4=폐기")와 어긋나 있었음
+# (예전 설계 당시 이름이 그대로 남아있던 것으로 보임) - b2는 시스템 전체에서
+# 항상 "못난이(ugly_box)"를 의미하므로 여기서도 그에 맞춰 통일한다.
 BASKET_DISPLAY_NAMES = {
-    "b1": "small",
-    "b2": "damaged",
+    "b1": "processing",
+    "b2": "ugly",
     "b3": "normal",
-    "b4": "rotten",
+    "b4": "discard",
 }
 
 APPLE_LABELS = {"apple_normal", "apple_rotten", "apple_damaged"}

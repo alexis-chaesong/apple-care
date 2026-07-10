@@ -29,6 +29,16 @@ MIN_KNOWN_CONFIDENCE = 0.4
 # 프레임 수집 단계에서 후보로 남길 최소 confidence (이후 최종 판정은 MIN_KNOWN_CONFIDENCE로 함)
 MIN_CANDIDATE_CONFIDENCE = 0.1
 
+# 실측으로 확인된 문제: get_best_detection()이 라벨 종류를 가리지 않고 면적
+# 최대인 박스를 그냥 골랐는데, "basket"/"full_basket"은 사과가 아니라 바스켓
+# 자체를 학습시킨 클래스(basket_camera.py가 박스 점유 여부를 확인하는 용도)라
+# 트레이 카메라 화면에 바스켓류 물체가 잡히면 면적이 커서 이 라벨이 최종 후보로
+# 뽑혀버리고, 그대로 fruit_type="full_basket"인 미확인 물체로 취급되어
+# HITL 질문/정책 학습까지 이어지는 버그가 있었음(바스켓을 "폐기"하는 등 말이 안
+# 되는 결과로 이어짐). 이 판정 경로(get_best_detection)에서는 애초에 후보에서
+# 제외한다.
+NON_FRUIT_LABELS = frozenset({"basket", "full_basket"})
+
 
 class AppleStatusModel:
     def __init__(self):
@@ -51,7 +61,8 @@ class AppleStatusModel:
 
         return list(frames.values())
 
-    def get_best_detection(self, img_node):
+    def get_best_detection(self, img_node, exclude_position=None, resolve_position=None,
+                            exclude_radius_mm=40.0):
         """카메라에 보이는 것 중 바운딩 박스 면적이 가장 큰 박스 하나를 반환.
 
         여러 사과가 동시에 보일 때, 처리 순서를 confidence가 아니라 "화면에
@@ -68,6 +79,15 @@ class AppleStatusModel:
         전부 그 기준 미만일 때만(진짜 아무 확실한 것도 없을 때만) 낮은 confidence
         후보들 중 면적 최대로 폴백함 (그래야 detection.py의 depth 기반 "unknown"
         폴백 경로도 계속 동작함).
+
+        exclude_position/resolve_position: 사용자가 HITL 질문에 "무시해"로
+        답한 사과를 이번 선택에서 제외하기 위함 (SrvAppleStatus.avoid_position로
+        전달받은 카메라 좌표). resolve_position(box) -> (x,y,z)를 넘겨주면, 이
+        좌표가 exclude_position과 exclude_radius_mm(기본 40mm, 사과 반지름보다
+        약간 크게) 이내인 후보를 pool에서 뺀 뒤 면적 최대를 고른다. 제외하고 나면
+        후보가 하나도 안 남으면(그 사과 하나만 보이는 상황) 제외를 포기하고 원래
+        pool 그대로 쓴다 - "무시했더니 아무것도 안 보임"이 되는 것보다는 같은
+        사과라도 계속 돌려주는 게 안전함(호출부가 어차피 다시 skip 처리 가능).
 
         반환값: (class_name, confidence, box[x1,y1,x2,y2]) 또는 감지된 게 전혀 없으면
         (None, None, None).
@@ -91,13 +111,28 @@ class AppleStatusModel:
             ):
                 if score < MIN_CANDIDATE_CONFIDENCE:
                     continue
-                candidates.append((CLASS_NAMES[int(label)], score, box))
+                class_name = CLASS_NAMES[int(label)]
+                if class_name in NON_FRUIT_LABELS:
+                    continue
+                candidates.append((class_name, score, box))
 
         if not candidates:
             return None, None, None
 
         confident_candidates = [c for c in candidates if c[1] >= MIN_KNOWN_CONFIDENCE]
         pool = confident_candidates if confident_candidates else candidates
+
+        if exclude_position and resolve_position is not None:
+            def _far_enough(candidate):
+                pos = resolve_position(candidate[2])
+                if pos is None:
+                    return True
+                dist = sum((a - b) ** 2 for a, b in zip(pos, exclude_position)) ** 0.5
+                return dist > exclude_radius_mm
+
+            filtered = [c for c in pool if _far_enough(c)]
+            if filtered:
+                pool = filtered
 
         return max(pool, key=lambda c: _box_area(c[2]))
 

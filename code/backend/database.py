@@ -122,6 +122,7 @@ def init_db():
             ("apple", "normal", "normal_box", "llm_policy", 1.0),
             ("apple", "mold", "discard_box", "llm_policy", 1.0),
             ("apple", "scratch", "processing_box", "llm_policy", 1.0),
+            ("apple", "bruise", "processing_box", "llm_policy", 1.0),
             # unknown 조건은 alpha/beta 학습 대상이므로 source를 human_feedback으로 잡지 않고
             # 시스템 기본 규칙(ask_human)으로 시작. 첫 피드백부터 학습이 시작됨
             ("apple", "unknown", "ask_human", "llm_policy", 1.0),

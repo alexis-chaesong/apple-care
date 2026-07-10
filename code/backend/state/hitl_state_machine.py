@@ -45,6 +45,7 @@ from typing import Optional
 from config import settings
 from robot_bridge import bridge_manager
 from connection_manager import connection_manager
+from vision_bridge import vision_bridge_manager
 from services import llm_service
 from services.llm_service import LLMTimeoutError, LLMParseError, LLMAuthError
 from services.bayesian_policy import record_human_feedback
@@ -240,6 +241,12 @@ class HITLStateMachine:
                 "fruit_type": session.fruit_type,
                 "condition": session.condition,
                 "confidence": session.vision_confidence,
+                # HMI가 "이 판정의 근거"를 보여줄 수 있도록 vision이 감지한 카메라
+                # 좌표를 그대로 실어 보냄 (기존엔 세션 내부(session.position)에만
+                # 보관되고 HMI로는 안 나갔음 - 특히 unknown_object는 vision_bridge.py의
+                # depth-only 블롭 검출 결과라 이 좌표가 "왜 미확인 물체로 판단했는지"의
+                # 근거 자체임).
+                "position": session.position,
             },
             "timestamp": time.time(),
         })
@@ -370,6 +377,30 @@ class HITLStateMachine:
         if destination is None:
             logger.info("애매한 답변으로 재질문 필요 (session_id=%s): %s", session.session_id, raw_answer)
             return False
+
+        if destination == "skip":
+            # 이 사과의 분류를 지금 정하지 않고 뒤로 미루겠다는 명시적 의사표현.
+            # null(애매함)과 달리 재질문하지 않고 세션을 바로 종료함 - 정책 학습도,
+            # 박스 이동 결정(publish_decision_result)도 하지 않는다(아직 아무것도
+            # 정해진 게 없으므로). 대신 vision_bridge에 이 사과의 좌표를 잠시
+            # 제외 대상으로 등록해서, 다음 폴링부터는 obj_detection이 다른 사과를
+            # 먼저 후보로 올리게 한다 (SKIP_EXCLUDE_COOLDOWN_SEC 지나면 자동 해제).
+            logger.info(
+                "작업자가 '무시'로 응답 - 이 사과는 보류하고 다른 사과부터 처리 (session_id=%s)",
+                session.session_id,
+            )
+            vision_bridge_manager.set_skip_position(session.position)
+            await connection_manager.broadcast({
+                "type": "HITL_SKIPPED",
+                "payload": {
+                    "session_id": session.session_id,
+                    "fruit_type": session.fruit_type,
+                    "condition": session.condition,
+                    "position": session.position,
+                },
+                "timestamp": time.time(),
+            })
+            return True
 
         # 4) 정책 학습 반영 + 로봇 재개
         updated_policy = record_human_feedback(

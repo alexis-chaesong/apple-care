@@ -166,19 +166,27 @@ async def interpret_human_answer(raw_answer: str) -> dict:
         "그냥 버려"       -> {"destination": "discard_box"}
         "그건 정상 판매"   -> {"destination": "normal_box"}
         "못난이로 보내"    -> {"destination": "ugly_box"}
+        "무시해, 나중에 할게" -> {"destination": "skip"}
 
-    애매하거나 destination 4가지 중 어디에도 안 맞으면 destination을 null로 반환하게 하고,
-    호출부(hitl_router.py)가 null이면 재질문하도록 처리해야 함
-    (여기서 억지로 추측해서 잘못된 destination을 반환하면 안 됨 - 안전 최우선)
+    애매하거나 다섯 가지 중 어디에도 안 맞으면 destination을 null로 반환하게 하고,
+    호출부(hitl_state_machine.py)가 null이면 재질문하도록 처리해야 함
+    (여기서 억지로 추측해서 잘못된 destination을 반환하면 안 됨 - 안전 최우선).
+
+    "skip"은 재질문이 아니라 확정된 답으로 취급됨 - 이 사과의 분류를 지금 정하지
+    않고 뒤로 미루겠다는 명시적 의사표현이므로, null(애매함)과 구분해야 함
+    (hitl_state_machine.py가 skip을 받으면 정책 학습/박스 이동 없이 세션을 종료하고
+    vision_bridge에 이 사과를 잠시 제외 대상으로 등록해 다른 사과부터 처리하게 함).
     """
     system_prompt = (
         "너는 작업자의 한국어 답변을 분류하는 역할이다. "
-        "답변이 다음 네 가지 중 어디에 해당하는지 판단해서 "
-        '{"destination": "normal_box"|"processing_box"|"discard_box"|"ugly_box"|null} '
+        "답변이 다음 다섯 가지 중 어디에 해당하는지 판단해서 "
+        '{"destination": "normal_box"|"processing_box"|"discard_box"|"ugly_box"|"skip"|null} '
         "형태의 JSON으로만 출력해라. "
         "normal_box=정상 판매, processing_box=가공용/2차 상품, discard_box=폐기, "
-        "ugly_box=못난이/등급외 상품(폐기까지는 아니지만 정상 판매도 아닌 경우). "
-        "넷 중 무엇인지 확실하지 않으면 반드시 null을 출력해라. 추측하지 마라."
+        "ugly_box=못난이/등급외 상품(폐기까지는 아니지만 정상 판매도 아닌 경우), "
+        "skip=지금 정하지 말고 나중에 하거나 넘어가자는 뜻(예: '무시해', '나중에 할게', "
+        "'일단 넘어가', '다른 것부터 해'). "
+        "다섯 중 무엇인지 확실하지 않으면 반드시 null을 출력해라. 추측하지 마라."
     )
     result = await _call_json(system_prompt, raw_answer)
     if "destination" not in result:

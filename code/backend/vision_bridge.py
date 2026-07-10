@@ -76,6 +76,11 @@ SPIN_TIMEOUT_SEC = 0.1
 # 1이면 예전 동작(즉시 리셋)과 같음.
 EMPTY_RESET_STREAK = 3
 
+# 작업자가 HITL 질문에 "무시해"로 답한 사과를 vision이 다시 최우선으로 고르지
+# 않도록 얼마나 오래 제외해둘지(초). 이 시간이 지나면 자동으로 제외를 풀어서
+# 다른 사과가 없으면 결국 이 사과도 다시 처리 대상이 됨 (영원히 방치되지 않게).
+SKIP_EXCLUDE_COOLDOWN_SEC = 60.0
+
 # 실측으로 확인된 문제: YOLO 판정이 프레임마다 흔들려서, 흠집(apple_damaged)이
 # 종종 곰팡이(apple_rotten)로 잘못 튀는 등 확실한 분류값도 단 한 프레임만으로
 # 바로 실행/질문까지 이어지는 경우가 있었음. 그래서 confident한 분류든 unknown이든
@@ -83,7 +88,7 @@ EMPTY_RESET_STREAK = 3
 # 모아서 그 중 다수결(최빈값)로 확정한 뒤에만 큐에 넣는다 - "확실한 것부터 처리하고
 # unknown은 가장 후순위로"라는 기존 원칙은 다수결 자체가 자연히 만족함(정상 분류가
 # 다수면 정상으로, unknown이 다수면 그때만 진짜 unknown으로 확정됨).
-CONFIRM_SAMPLE_COUNT = 10
+CONFIRM_SAMPLE_COUNT = 5
 
 # obj_detection/yolo.py의 CLASS_NAMES + detection.py가 붙이는 unknown/empty를 포함한
 # 전체 status 값 중, 실제 fruit_type/defect_type으로 명확히 매핑되는 값들만 여기 정의.
@@ -176,11 +181,20 @@ class VisionBridgeManager:
 
         # 다수결 확정용 샘플 창(window). (status, confidence, position) 튜플을
         # CONFIRM_SAMPLE_COUNT개 모을 때까지는 큐에 넣지 않고 계속 쌓기만 함.
-        # _sample_position_ref는 "지금 모으고 있는 게 같은 물체인지" 판단 기준이 되는
-        # 첫 샘플의 position - 창을 채우는 도중 위치가 유의미하게 달라지면(실제로
-        # 다른 물체로 바뀐 것으로 판단) 창을 새로 시작한다.
+        # _sample_position_ref는 평균 계산의 시작값 참고용일 뿐, 창을 리셋하는
+        # 기준으로는 쓰지 않음 (position 흔들림으로 리셋하면 안 되는 이유는
+        # _on_response의 해당 주석 참고) - "다른 물체로 바뀜"은 오직 empty
+        # 스트릭(응답 자체가 empty로 몇 번 연속 옴)으로만 판단한다.
         self._samples: list[tuple[str, float, list[float]]] = []
         self._sample_position_ref: Optional[list[float]] = None
+
+        # "무시" 응답으로 제외된 사과의 카메라 좌표 + 언제부터 제외했는지.
+        # _poll_once가 매 폴링마다 SrvAppleStatus.Request.avoid_position에 실어
+        # 보내서, obj_detection이 이 좌표 근처 후보를 이번 선택에서 빼도록 함
+        # (yolo.py의 get_best_detection 참고). SKIP_EXCLUDE_COOLDOWN_SEC이 지나면
+        # 자동으로 풀림.
+        self._skip_position: Optional[list[float]] = None
+        self._skip_started_at: float = 0.0
 
     # ------------------------------------------------------------------
     def start_bridge(self, fastapi_loop: AbstractEventLoop, output_queue: Queue) -> None:
@@ -262,9 +276,29 @@ class VisionBridgeManager:
             logger.debug("get_apple_status 서비스가 아직 준비되지 않음, 이번 폴링 건너뜀")
             return
 
+        request = SrvAppleStatus.Request()
+        if self._skip_position is not None:
+            if time.time() - self._skip_started_at >= SKIP_EXCLUDE_COOLDOWN_SEC:
+                logger.info("스킵 제외 시간(%.0f초) 만료 - 해당 사과를 다시 후보에 포함시킴", SKIP_EXCLUDE_COOLDOWN_SEC)
+                self._skip_position = None
+            else:
+                request.avoid_position = self._skip_position
+
         self._pending_call = True
-        future = self.client.call_async(SrvAppleStatus.Request())
+        future = self.client.call_async(request)
         future.add_done_callback(self._on_response)
+
+    def set_skip_position(self, position: Optional[list[float]]) -> None:
+        """
+        HITL "무시" 응답을 받았을 때 hitl_state_machine.py가 호출함. 이후 폴링부터
+        SKIP_EXCLUDE_COOLDOWN_SEC 동안 obj_detection이 이 좌표 근처 사과를 최우선
+        후보에서 제외하도록 한다 (다른 사과 먼저 처리되게 함).
+        """
+        if not position:
+            self._skip_position = None
+            return
+        self._skip_position = position
+        self._skip_started_at = time.time()
 
     def _on_response(self, future) -> None:
         """서비스 응답 도착 콜백 (ROS2 스레드에서 실행)."""
@@ -301,17 +335,16 @@ class VisionBridgeManager:
             if _is_zero_position(position):
                 position = []
 
-            # 창을 채우는 도중 위치가 유의미하게 달라지면 실제로 다른 물체가
-            # 나타난 것으로 보고 창을 새로 시작한다 (이전에 모으던 샘플은 버림).
-            if (
-                position
-                and self._sample_position_ref
-                and not _positions_close(
-                    position, self._sample_position_ref, settings.vision_position_dedup_threshold_mm
-                )
-            ):
-                self._reset_sample_window()
-
+            # 주의: 여기서 position 흔들림을 이유로 창을 리셋하면 안 됨 - 실측으로
+            # 확인된 문제(사과 하나를 옮기고 CAMERA로 복귀해도 로봇이 계속 가만히
+            # 있음): RealSense depth 노이즈는 같은 사과를 보고 있어도 프레임마다
+            # vision_position_dedup_threshold_mm(5mm)을 넘게 흔들리는 경우가 흔한데,
+            # 창의 "첫 샘플 위치"만을 기준으로 흔들릴 때마다 리셋하면 10개를 다
+            # 채우기 전에 계속 리셋되어 영원히 다수결 확정에 도달하지 못함. 이
+            # 파이프라인은 main.py의 READY 게이팅상 CAMERA 위치에서 한 번에 한
+            # 물체만 보이는 게 전제이므로, "다른 물체로 바뀜"은 이미 empty
+            # 스트릭(위 응답 분기)으로만 판단하고 여기서는 position 유사성으로
+            # 따로 리셋하지 않는다 - _sample_position_ref는 평균 계산 참고용으로만 씀.
             if self._sample_position_ref is None and position:
                 self._sample_position_ref = position
             self._samples.append((response.status, confidence, position))

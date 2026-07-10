@@ -1,3 +1,4 @@
+float64[] avoid_position
 ---
 string status
 float64 confidence

@@ -54,6 +54,16 @@ BACKGROUND_CALIBRATION_SAMPLE_INTERVAL_SEC = 0.05
 # morphological opening 커널 크기(px). 사과처럼 두꺼운 덩어리는 그대로 남는다.
 NOISE_OPEN_KERNEL_PX = 9
 
+# 실측으로 확인된 문제: PRESENCE_MARGIN_MM(10mm)은 픽셀을 foreground mask에
+# "포함시킬지"만 판단하는 매우 낮은 문턱값이라, 트레이가 비어 있어도 depth 센서
+# 노이즈/반사만으로 10mm 넘게 튀는 픽셀들이 우연히 MIN_PRESENCE_PIXELS(500px)
+# 이상 뭉쳐서 "unknown"으로 오판되고 그대로 HITL 음성 질문까지 이어지는 사례가
+# 있었음. 그래서 블롭 단위로 한 번 더 확인: 그 블롭이 실제로 배경보다
+# UNKNOWN_BLOB_MIN_HEIGHT_MM(30mm) 이상 튀어나와 있어야만 "진짜 물체가 있다"고
+# 인정한다 - 사과는 지름이 60~90mm대라 30mm는 노이즈와 실제 사과를 가르기에
+# 충분히 크면서도 작은 사과를 놓칠 만큼 크지는 않음.
+UNKNOWN_BLOB_MIN_HEIGHT_MM = 30
+
 # YOLO 박스 안쪽 깊이와 바로 바깥 주변 깊이의 차이가 이 값(mm) 이상일 때만
 # "물체가 배경보다 튀어나와 있다"고 보고 실제 감지로 표시한다.
 # (아래 INNER_DEPTH_PERCENTILE로 박스 안쪽의 "정점 부근" 값을 쓰게 되어 이전보다
@@ -162,21 +172,43 @@ class DepthAnalysisMixin:
             cx, cy = centroids[label]
             cx, cy = int(round(cx)), int(round(cy))
 
+            label_mask = labels == label
+
             # centroid는 픽셀 좌표의 산술평균이라, 덩어리 모양이 오목하거나 안쪽에
             # depth 무효(0)인 구멍이 있으면(광택 있는 표면의 반사로 흔히 생김) 정작
             # centroid 위치 자체는 덩어리 바깥/구멍 안일 수 있다. 그 한 픽셀만
             # 읽으면 큰 덩어리를 찾아놓고도 depth=0이라 버려지는 문제가 생기므로,
             # 덩어리에 실제로 속한 모든 픽셀의 depth 중앙값을 쓴다.
-            blob_depths = depth_frame[labels == label]
-            blob_depths = blob_depths[blob_depths > 0]
+            raw_depths = depth_frame[label_mask]
+            raw_bg = (
+                self.background_depth_map[label_mask]
+                if self.background_depth_map is not None else None
+            )
+            valid = raw_depths > 0
+            if raw_bg is not None:
+                valid = valid & (raw_bg > 0)
+            blob_depths = raw_depths[valid]
             if blob_depths.size == 0:
                 continue
             depth_mm = float(np.median(blob_depths))
+
+            # 실측으로 확인된 문제(UNKNOWN_BLOB_MIN_HEIGHT_MM 주석 참고): 픽셀
+            # 포함 기준(PRESENCE_MARGIN_MM=10mm)만으로는 depth 노이즈로도 블롭이
+            # 만들어질 수 있으므로, 이 블롭이 실제 배경보다 확실히(30mm 이상)
+            # 튀어나와 있는지 한 번 더 검증한다 - 이 검증을 통과 못 하면 물체로
+            # 인정하지 않고 버린다(다음 블롭 후보로 넘어감).
+            height_diff_mm = None
+            if raw_bg is not None:
+                bg_valid = raw_bg[valid].astype(np.int32)
+                height_diff_mm = float(np.median(bg_valid - blob_depths.astype(np.int32)))
+                if height_diff_mm < UNKNOWN_BLOB_MIN_HEIGHT_MM:
+                    continue
 
             blobs.append({
                 'bbox': (x, y, x + w, y + h),
                 'centroid': (cx, cy),
                 'depth_mm': depth_mm,
+                'height_diff_mm': height_diff_mm,
                 'area': area,
             })
 
@@ -190,15 +222,6 @@ class DepthAnalysisMixin:
         if not blobs:
             return None
         return max(blobs, key=lambda b: b['area'])
-
-    def _find_unknown_object_position(self, depth_frame):
-        """YOLO가 박스를 못 찾았을 때, depth 블롭의 위치를 카메라 좌표계 (x,y,z)로 변환.
-        반환값: (x, y, z) 또는 블롭이 없으면 None."""
-        blob = self._find_unknown_blob(depth_frame)
-        if blob is None:
-            return None
-        cx, cy = blob['centroid']
-        return self._pixel_to_camera_coords(cx, cy, blob['depth_mm'])
 
     def _box_ring_depths(self, depth_frame, box):
         """박스 안쪽 depth와, 박스 바로 바깥 테두리(ring) depth median을 반환.

@@ -30,7 +30,9 @@ from pydantic import BaseModel
 from models import RawFeedbackIn
 from services import llm_service
 from services.llm_service import LLMTimeoutError, LLMParseError, LLMAuthError
-from services.bayesian_policy import get_policy, record_human_feedback, upsert_llm_policy
+from services.bayesian_policy import (
+    get_policy, record_human_feedback, upsert_llm_policy, delete_policy, reset_all_policies,
+)
 from services.voice_policy import run_voice_policy_command
 from robot_bridge import bridge_manager
 
@@ -72,6 +74,34 @@ async def get_policy_detail(fruit_type: str, condition: str):
     if policy is None:
         raise HTTPException(status_code=404, detail="해당 조건에 대한 정책이 아직 없습니다.")
     return {"result": "SUCCESS", "data": policy}
+
+
+@router.delete("/policy/{fruit_type}/{condition}", summary="특정 조건의 정책 초기화(삭제)")
+async def delete_policy_detail(fruit_type: str, condition: str):
+    """
+    잘못 학습된 정책(예: 단 한 번의 답변만으로 threshold를 넘어 자동 실행으로
+    굳어버린 destination)을 완전히 지워서 "아직 안 배운 상태"로 되돌림. 다음에
+    이 조합이 감지되면 다시 ask_human부터 시작해 처음부터 학습된다.
+    """
+    deleted = delete_policy(fruit_type, condition)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="해당 조건에 대한 정책이 없습니다.")
+    return {"result": "DELETED", "fruit_type": fruit_type, "condition": condition}
+
+
+@router.delete("/policy", summary="전체 정책 초기화 (주의: 되돌릴 수 없음)")
+async def reset_all_policies_endpoint(confirm: bool = False):
+    """
+    tb_policy_memory 전체를 비움 (데모 리허설을 처음부터 다시 하고 싶을 때 등).
+    실수로 전체가 지워지는 걸 막기 위해 ?confirm=true를 명시해야만 실행됨.
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="전체 정책을 초기화하려면 쿼리 파라미터 ?confirm=true를 명시해야 합니다.",
+        )
+    count = reset_all_policies()
+    return {"result": "RESET_ALL", "deleted_count": count}
 
 
 class PolicyCommandIn(BaseModel):
