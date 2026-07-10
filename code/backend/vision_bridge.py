@@ -88,7 +88,7 @@ SKIP_EXCLUDE_COOLDOWN_SEC = 60.0
 # 모아서 그 중 다수결(최빈값)로 확정한 뒤에만 큐에 넣는다 - "확실한 것부터 처리하고
 # unknown은 가장 후순위로"라는 기존 원칙은 다수결 자체가 자연히 만족함(정상 분류가
 # 다수면 정상으로, unknown이 다수면 그때만 진짜 unknown으로 확정됨).
-CONFIRM_SAMPLE_COUNT = 5
+CONFIRM_SAMPLE_COUNT = 3
 
 # obj_detection/yolo.py의 CLASS_NAMES + detection.py가 붙이는 unknown/empty를 포함한
 # 전체 status 값 중, 실제 fruit_type/defect_type으로 명확히 매핑되는 값들만 여기 정의.
