@@ -33,6 +33,11 @@ DEPTH_DEBUG_WINDOW_NAME = "Depth Debug"
 OVERLAY_FONT_SCALE = 0.6
 OVERLAY_FONT_THICKNESS = 2
 
+# 이 값 이하의 YOLO confidence는 depth 판정과 무관하게 빨간 박스로 표시 -
+# 작업자가 화면만 보고도 "이 박스는 신뢰도가 낮으니 결과를 의심해야 한다"를
+# 바로 알 수 있게 하기 위함.
+CONFIDENCE_RED_THRESHOLD = 0.4
+
 
 class DebugOverlayMixin:
     """뎁스 디버그 창 + 프론트용 디버그 이미지 토픽을 그리는 mixin."""
@@ -125,16 +130,19 @@ class DebugOverlayMixin:
                 inner_depth is not None and ring_depth is not None
                 and (ring_depth - inner_depth) >= HEIGHT_DIFF_MARGIN_MM
             )
+            low_confidence = score <= CONFIDENCE_RED_THRESHOLD
             if label == "basket":
-                # basket은 사과 depth 높이차 판정과 무관한 클래스라 depth_ok로
+                # basket은 사과 depth 높이차 판정/confidence와 무관한 클래스라
                 # 색을 정하지 않고 고정 파란색으로 표시(BGR이라 (255, 0, 0)).
                 box_color = (255, 0, 0)  # 파란색 = basket
             else:
-                box_color = (0, 255, 0) if depth_ok else (0, 0, 255)  # OK=초록, FAIL=빨강
+                box_color = (0, 0, 255) if (not depth_ok or low_confidence) else (0, 255, 0)  # FAIL/저신뢰=빨강, 그 외=초록
             cv2.rectangle(colormap, (x1, y1), (x2, y2), box_color, 2)
 
             if not depth_ok:
                 caption = f"{label} {score:.2f} depth-FAIL"
+            elif low_confidence:
+                caption = f"{label} {score:.2f} low-conf"
             else:
                 diameter_mm = self._real_world_diameter_mm(depth_frame, box)
                 preview_label = self._preview_size_label(label, diameter_mm)
