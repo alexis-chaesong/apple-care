@@ -285,6 +285,7 @@ def check_and_recover(
     get_current_pos: Callable[[], Any],
     posx_factory: Callable[..., Any],
     check_hw_safety_stop: Optional[Callable[[], "tuple"]] = None,
+    reset_hw_safety_stop: Optional[Callable[[], bool]] = None,
     resume_motion: Optional[Callable[[], Any]] = None,
     describe_robot_state: Optional[Callable[[], str]] = None,
     wait_for_resume: Optional[Callable[[], None]] = None,
@@ -306,6 +307,18 @@ def check_and_recover(
         그대로 걸어둔 채 True만 반환함(호출부는 다음 루프에서 다시 확인하게 됨).
         None이면(기본값) 이 확인을 건너뜀 - 하위 호환용.
 
+    reset_hw_safety_stop: 넘겨주면(예: safe_motion.reset_controller_safety_stop을
+        노드에 바인딩한 callable, () -> bool), 하드웨어 안전정지가 감지됐을 때 무한정
+        "펜던트에서 직접 해제하라"고만 기다리지 않고, 운영자가 프론트엔드에서
+        재개(RESUME)를 눌러 현장 확인을 완료한 시점에 이 콜백으로 system/set_robot_control
+        서비스를 호출해 소프트웨어로 STANDBY까지 되돌려본다(로봇 재연결/컨트롤러
+        재부팅 불필요 - safe_motion.reset_controller_safety_stop 참고). 성공하면 그대로
+        이어서 물리 복구(상승->홈->...)를 진행하고, 실패하면(예: 아직 EMERGENCY_STOP
+        버튼이 물리적으로 눌려있는 등 소프트웨어로 못 푸는 상태) 기존처럼 다음 루프에서
+        다시 확인한다. wait_for_resume이 없으면(운영자 확인 게이트 자체가 없으면) 이
+        콜백도 호출하지 않음 - 사람 확인 없이 하드웨어 안전정지를 자동으로 풀면 안 되기
+        때문. None이면(기본값) 시도하지 않고 기존처럼 물리적 해제만 기다림 - 하위 호환용.
+
     resume_motion: execute_recovery()로 그대로 전달됨 - safe_motion.resume_motion 참고.
     describe_robot_state: execute_recovery()로 그대로 전달됨 - execute_recovery의
         describe_robot_state 설명 참고.
@@ -326,6 +339,12 @@ def check_and_recover(
     if not emergency_stop_event.is_set():
         return False
 
+    # 물리 복구(lift/home/...)를 아직 시작하지 않았는데도 이미 운영자 확인을
+    # 받은 경우(아래 하드웨어 안전정지 분기에서 reset_hw_safety_stop 성공) True로
+    # 바뀜 - 이 경우 맨 아래에서 wait_for_resume()을 또 호출해 이중으로 대기시키지
+    # 않기 위한 플래그.
+    already_confirmed_by_operator = False
+
     if check_hw_safety_stop is not None:
         is_blocked, state_name = check_hw_safety_stop()
         if is_blocked:
@@ -337,10 +356,38 @@ def check_and_recover(
             node.get_logger().error(f"[E-STOP] {msg}")
             status_bus.set_state("ERROR", f"controller_safety_stop:{state_name}")
             status_bus.publish_safety("ERR_SYSTEM", msg)
-            # emergency_stop_event는 그대로 걸어둔 채 리턴 - 호출부가 다시 decision을
-            # 받지 않고 다음 루프에서 이 함수를 재호출해 상태를 다시 확인하게 함.
-            wait(1.0)
-            return True
+
+            if reset_hw_safety_stop is not None and wait_for_resume is not None:
+                # 사람 확인 없이 하드웨어 안전정지를 자동으로 풀면 안 되므로, 여기서
+                # 바로 재시도하지 않고 운영자가 현장을 확인하고 프론트엔드에서
+                # 재개(RESUME)를 누를 때까지 먼저 기다린다 (reset_hw_safety_stop
+                # 인자 설명 참고).
+                node.get_logger().warn(
+                    "[E-STOP] 소프트웨어로 해제를 시도해볼 수 있는 상태입니다 - 현장 확인 후 "
+                    "재개(RESUME) 신호를 기다립니다."
+                )
+                status_bus.set_state("ERROR", "waiting_for_resume")
+                wait_for_resume()
+                node.get_logger().info("[E-STOP] RESUME 수신 - 안전정지 해제를 시도합니다.")
+
+                if reset_hw_safety_stop():
+                    node.get_logger().info(
+                        "[E-STOP] 안전정지 해제 성공(STANDBY) - 이어서 물리 복구를 진행합니다."
+                    )
+                    already_confirmed_by_operator = True
+                else:
+                    node.get_logger().error(
+                        "[E-STOP] 안전정지 해제 실패 - 여전히 펜던트/컨트롤러에서 물리적으로 "
+                        "해제해야 합니다. 다음 루프에서 다시 확인합니다."
+                    )
+                    # emergency_stop_event는 그대로 걸어둔 채 리턴 - 호출부가 다시 decision을
+                    # 받지 않고 다음 루프에서 이 함수를 재호출해 상태를 다시 확인하게 함.
+                    return True
+            else:
+                # emergency_stop_event는 그대로 걸어둔 채 리턴 - 호출부가 다시 decision을
+                # 받지 않고 다음 루프에서 이 함수를 재호출해 상태를 다시 확인하게 함.
+                wait(1.0)
+                return True
 
     node.get_logger().error("EMERGENCY_STOP 감지 - 복구 절차를 시작합니다.")
     status_bus.set_state("ERROR", "emergency_stop")
@@ -373,11 +420,14 @@ def check_and_recover(
     status_bus.publish_gripper_status(False)
     emergency_stop_event.clear()
 
-    if wait_for_resume is not None:
+    if wait_for_resume is not None and not already_confirmed_by_operator:
         # 물리적으로는 이미 안전한 위치(카메라)에 서 있지만, 운영자가 현장을
         # 확인하고 프론트엔드에서 재개 버튼을 누르기 전까지는 READY로 넘어가지
         # 않음 - READY가 아니면 백엔드가 새 Vision 판단을 하지 않으므로(main.py의
         # _vla_consumer_loop 게이팅) 이 상태로 있는 동안은 안전하게 대기만 함.
+        # already_confirmed_by_operator가 True면(위에서 하드웨어 안전정지 해제
+        # 전에 이미 한 번 RESUME을 받았으면) 여기서 또 기다리지 않음 - 운영자가
+        # 이미 확인한 동일 이벤트에 대해 두 번 누르게 하는 건 불필요함.
         node.get_logger().warn("[E-STOP] 물리 복구 완료 - 재개(RESUME) 신호를 기다립니다.")
         status_bus.set_state("ERROR", "waiting_for_resume")
         wait_for_resume()

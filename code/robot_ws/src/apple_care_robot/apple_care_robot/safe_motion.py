@@ -32,7 +32,7 @@ check_and_recover)로 넘어갈 수 있음.
 
 import time as _time
 
-from dsr_msgs2.srv import MoveStop, MoveResume, GetRobotState
+from dsr_msgs2.srv import MoveStop, MoveResume, GetRobotState, SetRobotControl
 
 # MoveStop.srv 기준 stop_mode 값 (참고용 전체 목록):
 #   0 = DR_QSTOP_STO (Quick stop, 안전 토크 차단 - 보통 재가동하려면 파트/원점 재설정 필요)
@@ -78,6 +78,39 @@ ROBOT_STATE_NAMES = {
 CONTROLLER_SAFETY_STATES = {3, 5, 6, 8, 9, 10, 15}
 
 
+def _spin_until_future_complete_safe(node, future, timeout_sec):
+    """
+    rclpy.spin_until_future_complete(node, future, timeout_sec=...)의 안전한 대체.
+
+    실기로 재현된 문제: executor를 안 넘기면 rclpy.spin_until_future_complete()는
+    내부적으로 rclpy.get_global_executor()를 만들어 그 node를 거기에 add_node()함
+    (rclpy/__init__.py 확인). box_sequence_test.py는 comm_node를 이미 전용
+    SingleThreadedExecutor(comm_executor)에 등록해서 별도 스레드에서 계속 spin
+    중인데, 이 함수들이 get_controller_robot_state()/stop_motion() 등에서 같은
+    comm_node를 또 다른(글로벌) executor에 동시에 add_node()해버리면, 두 executor가
+    동시에 같은 node의 wait set/구독을 건드리게 됨. 그 결과 지금 기다리는 서비스
+    응답 자체는 받아오는데, 그 이후로 comm_executor가 더 이상 새 구독 콜백
+    (특히 /robot/command로 들어오는 RESUME)을 처리하지 못하는 상태로 예외/로그도
+    없이 조용히 망가지는 문제가 실기에서 재현됨 - "물리 복구 완료 - 재개(RESUME)
+    신호를 기다립니다" 뒤에 RESUME을 아무리 다시 보내도 반응이 없던 원인이 이것.
+
+    node.executor가 이미 설정돼 있으면(=다른 스레드가 이미 이 node를 전담으로
+    spin 중이라는 뜻 - Executor.add_node()가 add될 때 node.executor를 그렇게
+    세팅함) 여기서 또 spin하지 않고, 그 스레드가 future를 완료시켜줄 때까지
+    그냥 폴링만 한다(call_async로 이미 요청은 나갔으므로, comm_executor가
+    알아서 응답을 처리해 future를 채워줌). node.executor가 없으면(=아무도 이
+    node를 백그라운드에서 spin해주고 있지 않음 - 예: DSR 제어용 메인 node)
+    기존과 동일하게 rclpy.spin_until_future_complete()로 직접 스핀한다.
+    """
+    if node.executor is not None:
+        deadline = _time.monotonic() + timeout_sec
+        while not future.done() and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+    else:
+        import rclpy  # 순환 의존 방지를 위해 필요한 지점에서만 import
+        rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_sec)
+
+
 def get_controller_robot_state(node):
     """
     dsr_controller2가 제공하는 system/get_robot_state 서비스를 호출해서
@@ -108,20 +141,28 @@ def get_controller_robot_state(node):
         "system/get_robot_state",                                                       # 노드 네임스페이스 기준 상대 경로
     )
 
-    import rclpy  # 순환 의존 방지를 위해 필요한 지점에서만 import
-
     for service_name in service_names:
         client = node.create_client(GetRobotState, service_name)
         if not client.wait_for_service(timeout_sec=0.2):
+            node.destroy_client(client)
             continue
 
         future = client.call_async(GetRobotState.Request())
-        rclpy.spin_until_future_complete(node, future, timeout_sec=0.8)
+        _spin_until_future_complete_safe(node, future, 0.8)
         if not future.done():
             node.get_logger().warning(f"로봇 상태 조회 시간 초과: service={service_name}")
+            node.destroy_client(client)
             return None
 
         result = future.result()
+        # 실측으로 확인된 문제: 이 함수는 이동 중 하드웨어 안전정지를 감시하려고
+        # make_hw_safety_watcher가 매 0.5초마다 호출함 - client를 안 지우고
+        # 매번 새로 만들기만 하면(destroy_client 없음), 장시간 세션(오늘처럼
+        # 여러 시간 테스트) 동안 comm_node에 서비스 클라이언트가 계속 쌓여서
+        # rclpy/DDS 리소스가 고갈되고, 그 결과로 이후의 check_motion()/서비스
+        # 호출들이 점점 느려지다가 결국 멈춰버리는(hang) 문제로 이어졌음. 매
+        # 호출 끝에 반드시 destroy_client로 정리한다.
+        node.destroy_client(client)
         if result is None or not result.success:
             node.get_logger().warning(f"로봇 상태 조회 실패: service={service_name}")
             return None
@@ -211,16 +252,18 @@ def stop_motion(node, stop_mode: int = STOP_MODE_DEFAULT) -> bool:
         # timeout_sec을 짧게 두는 이유: 없는 서비스 이름을 오래 기다리면 그만큼
         # "정지"가 늦어짐. 후보 3개를 다 합쳐도 최대 1초 이내로 끝나도록 짧게 잡음.
         if not client.wait_for_service(timeout_sec=0.2):
+            node.destroy_client(client)
             continue
 
         request = MoveStop.Request()
         request.stop_mode = int(stop_mode)
         future = client.call_async(request)
-
-        import rclpy  # 순환 의존 방지를 위해 필요한 지점에서만 import
-        rclpy.spin_until_future_complete(node, future, timeout_sec=0.8)
+        _spin_until_future_complete_safe(node, future, 0.8)
 
         result = future.result() if future.done() else None
+        # get_controller_robot_state와 동일한 이유로(장시간 세션에서 클라이언트가
+        # 계속 쌓여 결국 rclpy/DDS 리소스가 고갈되는 문제) 매번 정리함.
+        node.destroy_client(client)
         if result is None:
             # 이 이름으로는 응답 자체를 못 받음(타임아웃 등) - 진짜로 이 후보가
             # 아닐 수 있으니 다음 후보를 시도.
@@ -275,14 +318,16 @@ def resume_motion(node) -> bool:
     for service_name in service_names:
         client = node.create_client(MoveResume, service_name)
         if not client.wait_for_service(timeout_sec=0.2):
+            node.destroy_client(client)
             continue
 
         future = client.call_async(MoveResume.Request())
-
-        import rclpy  # 순환 의존 방지를 위해 필요한 지점에서만 import
-        rclpy.spin_until_future_complete(node, future, timeout_sec=0.8)
+        _spin_until_future_complete_safe(node, future, 0.8)
 
         result = future.result() if future.done() else None
+        # get_controller_robot_state와 동일한 이유로(장시간 세션에서 클라이언트가
+        # 계속 쌓여 결국 rclpy/DDS 리소스가 고갈되는 문제) 매번 정리함.
+        node.destroy_client(client)
         if result is not None and result.success:
             node.get_logger().warning(f"[safe_motion] 재개 성공: service={service_name}")
             return True
@@ -293,6 +338,121 @@ def resume_motion(node) -> bool:
         f"[safe_motion] motion/move_resume 서비스를 찾지 못했거나 호출에 실패했습니다: {service_names}"
     )
     return False
+
+
+
+# dsr_msgs2/srv/SetRobotControl.srv 주석 기준 robot_control 값 - system/set_robot_control
+# 서비스 호출만으로(로봇 재연결/컨트롤러 재부팅 없이) 컨트롤러 상태를 STANDBY로
+# 되돌릴 수 있는 코드들만 여기 옮겨 적음(전체 목록은 그 .srv 파일 참고).
+_CONTROL_RESET_SAFET_STOP = 2   # STATE_SAFE_STOP -> STATE_STANDBY
+_CONTROL_RESET_SAFET_OFF = 3    # STATE_SAFE_OFF -> STATE_STANDBY
+_CONTROL_RECOVERY_SAFE_STOP = 4  # STATE_SAFE_STOP2 -> STATE_RECOVERY (S/W 기반)
+_CONTROL_RECOVERY_SAFE_OFF = 5   # STATE_SAFE_OFF2 -> STATE_RECOVERY (S/W 기반)
+_CONTROL_RESET_RECOVERY = 7      # STATE_RECOVERY -> STATE_STANDBY
+
+# robot_state(get_controller_robot_state 결과) -> 그 상태에서 STANDBY까지
+# 가기 위해 순서대로 호출해야 할 robot_control 코드들. SAFE_STOP2/SAFE_OFF2는
+# RECOVERY를 한 번 거쳐야 해서 두 단계임. EMERGENCY_STOP(6)은 일부러 여기 넣지
+# 않음 - 물리 비상정지 버튼 자체를 손으로 해제해야 풀리는 하드웨어 래치라서,
+# 서비스 호출로 우회 시도하면 안 됨(대부분 버튼을 해제하면 SAFE_STOP으로 바뀌고,
+# 그 상태는 아래 5번 경로로 이어서 처리됨). NOT_READY(15)도 마찬가지로 이
+# 함수가 다루는 범위 밖(초기화 절차가 따로 필요)이라 제외함.
+_SOFTWARE_RESETTABLE_STATE_PLAN = {
+    3: (_CONTROL_RESET_SAFET_OFF,),
+    5: (_CONTROL_RESET_SAFET_STOP,),
+    8: (_CONTROL_RESET_RECOVERY,),
+    9: (_CONTROL_RECOVERY_SAFE_STOP, _CONTROL_RESET_RECOVERY),
+    10: (_CONTROL_RECOVERY_SAFE_OFF, _CONTROL_RESET_RECOVERY),
+}
+
+
+def reset_controller_safety_stop(node) -> bool:
+    """
+    소프트웨어로 복구 가능한 컨트롤러 안전정지 상태(SAFE_OFF/SAFE_STOP/RECOVERY/
+    SAFE_STOP2/SAFE_OFF2)를 system/set_robot_control 서비스 호출만으로 STANDBY까지
+    되돌린다 - 로봇 재연결/컨트롤러 재부팅이 필요 없음(dsr_msgs2/srv/SetRobotControl.srv
+    주석 기준).
+
+    estop_handler.check_and_recover()가 is_controller_in_hardware_safety_stop()으로
+    하드웨어 안전정지를 감지했을 때, 운영자가 프론트엔드에서 재개(RESUME)를 눌러
+    현장 확인을 완료한 시점에만 호출해야 함 - 안전정지 원인(장애물/충돌 등)을
+    사람이 직접 확인했다는 전제가 있어야 소프트웨어로 상태만 풀어주는 게 안전하기
+    때문. 매 폴링마다 자동으로 시도하면 안 됨.
+
+    EMERGENCY_STOP(물리 비상정지 버튼)처럼 _SOFTWARE_RESETTABLE_STATE_PLAN에 없는
+    상태는 일부러 시도하지 않고 바로 False를 반환함 - 그 경우는 여전히 펜던트/
+    컨트롤러에서 사람이 직접 해제해야 함.
+
+    Returns:
+        bool: 서비스 호출들이 모두 성공하고 최종 상태가 STANDBY(1)로 확인되면 True.
+        상태 조회 실패, 매핑 없는 상태, 서비스를 못 찾음/거부됨 중 하나라도
+        있으면 False - 호출부는 이 경우 기존처럼 "펜던트/컨트롤러에서 직접 해제"
+        메시지로 폴백해야 함.
+    """
+    robot_state = get_controller_robot_state(node)
+    if robot_state is None:
+        return False
+
+    plan = _SOFTWARE_RESETTABLE_STATE_PLAN.get(robot_state)
+    if plan is None:
+        node.get_logger().error(
+            f"[safe_motion] robot_state={robot_state}"
+            f"({ROBOT_STATE_NAMES.get(robot_state, 'UNKNOWN')})는 서비스 호출만으로 "
+            "복구할 수 없는 상태입니다 - 펜던트/컨트롤러에서 직접 해제해야 합니다."
+        )
+        return False
+
+    service_names = (
+        f"/{node.get_namespace().strip('/')}/dsr_controller2/system/set_robot_control",
+        f"/{node.get_namespace().strip('/')}/system/set_robot_control",
+        "system/set_robot_control",
+    )
+
+    for control_code in plan:
+        called = False
+        for service_name in service_names:
+            client = node.create_client(SetRobotControl, service_name)
+            if not client.wait_for_service(timeout_sec=0.2):
+                node.destroy_client(client)
+                continue
+
+            request = SetRobotControl.Request()
+            request.robot_control = control_code
+            future = client.call_async(request)
+            _spin_until_future_complete_safe(node, future, 1.0)
+
+            result = future.result() if future.done() else None
+            # 다른 서비스 클라이언트들과 동일한 이유로(장시간 세션에서 계속
+            # 쌓여 결국 rclpy/DDS 리소스가 고갈되는 문제) 매번 정리함.
+            node.destroy_client(client)
+            if result is None or not result.success:
+                node.get_logger().error(
+                    f"[safe_motion] set_robot_control(robot_control={control_code}) 실패: "
+                    f"service={service_name}"
+                )
+                return False
+
+            node.get_logger().info(
+                f"[safe_motion] set_robot_control(robot_control={control_code}) 성공: "
+                f"service={service_name}"
+            )
+            called = True
+            break
+
+        if not called:
+            node.get_logger().warning(
+                f"[safe_motion] system/set_robot_control 서비스를 찾지 못했습니다: {service_names}"
+            )
+            return False
+
+    final_state = get_controller_robot_state(node)
+    if final_state != 1:
+        node.get_logger().error(
+            f"[safe_motion] set_robot_control 호출은 다 성공했는데 최종 상태가 STANDBY가 "
+            f"아닙니다(robot_state={final_state}) - 안전을 위해 복구를 진행하지 않습니다."
+        )
+        return False
+    return True
 
 
 def make_hw_safety_watcher(

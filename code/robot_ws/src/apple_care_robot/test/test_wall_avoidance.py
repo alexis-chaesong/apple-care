@@ -152,11 +152,14 @@ def test_tilt_orientation_differs_per_wall_direction():
             assert values[i] != values[j]
 
 
-# ── 상단(y_max) 벽 "직선 접근" 예외 회귀 테스트 ─────────────────────────────
-# 실측 요구사항: 상단(후면) 벽 근처에는 사과가 여러 개 나란히 놓이는 경우가 많아서,
-# 다른 세 벽처럼 기울여 접근하면 hover 경유점이 옆으로 빠지면서 이웃 사과와 부딪힐
-# 위험이 있음 - 그래서 이 벽 하나에만 가까운 경우(모서리 아님)는 기울이지 않고
-# 자세를 그대로 유지해야 함(STRAIGHT_APPROACH_WALLS 참고).
+# ── 상단(y_max) 벽에서 tilt+yaw가 적용되는지 확인 ───────────────────────────
+# 과거에는 이 벽 하나에만 가까운 경우(모서리 아님) 이웃 사과 충돌 우려로 기울이지
+# 않고 자세를 그대로 유지했었음(STRAIGHT_APPROACH_WALLS). 그런데 실측 결과 이
+# 예외 때문에 tool Y축이 이 벽에 수직이 아니라 평행하게 나오는 문제가 확인되어
+# (DEFAULT_PICK_ORIENTATION 기준 tool Y는 base X에 가까움 - 좌우 벽엔 우연히
+# 맞지만 상/하단 벽엔 틀림) 예외를 없애고, 대신 접근축(tool Z) 기준 요(yaw)를
+# 얹어 tool Y가 base Y(이 벽의 법선) 방향을 향하도록 바꿈
+# (FRONT_BACK_YAW_WALLS/FRONT_BACK_YAW_DEG 참고).
 
 def _make_pick_pos_near_y_max(offset_from_wall_mm):
     cx = (TRAY_X_MIN_MM + TRAY_X_MAX_MM) / 2
@@ -164,7 +167,7 @@ def _make_pick_pos_near_y_max(offset_from_wall_mm):
     return (cx, y, 10.0, *_REAL_PICK_ORIENTATION)
 
 
-def test_compute_wall_aware_approach_keeps_orientation_for_pure_y_max_wall():
+def test_compute_wall_aware_approach_tilts_and_yaws_for_pure_y_max_wall():
     def _fake_posx(x, y, z, rx, ry, rz):
         return (x, y, z, rx, ry, rz)
 
@@ -172,12 +175,18 @@ def test_compute_wall_aware_approach_keeps_orientation_for_pure_y_max_wall():
     hover_pos, tilted_pick_pos = compute_wall_aware_approach(pick_pos, _fake_posx)
 
     assert hover_pos is not None  # 벽 근처로는 감지돼야 함(hover 경유점은 여전히 생김)
-    # 기울이지 않으므로 orientation(rx,ry,rz)은 원래 자세와 거의 같아야 함
-    # (부동소수점 오차만 허용).
-    for actual, expected in zip(hover_pos[3:], _REAL_PICK_ORIENTATION):
-        assert abs(actual - expected) < 1e-6
-    for actual, expected in zip(tilted_pick_pos[3:], _REAL_PICK_ORIENTATION):
-        assert abs(actual - expected) < 1e-6
+    # 더 이상 자세를 그대로 유지하지 않음 - tilt+yaw가 적용돼 원래 자세와
+    # 뚜렷이 달라져야 함.
+    assert any(
+        abs(actual - expected) > 1.0
+        for actual, expected in zip(tilted_pick_pos[3:], _REAL_PICK_ORIENTATION)
+    )
+
+    # 핵심 회귀 확인: tool Y축이 이제 base Y 성분(이 벽의 법선)이 base X 성분보다
+    # 커야 함 - yaw 보정 전에는 반대(거의 base X 방향)였음.
+    from scipy.spatial.transform import Rotation
+    tool_y = Rotation.from_euler("ZYZ", tilted_pick_pos[3:], degrees=True).as_matrix()[:, 1]
+    assert abs(tool_y[1]) > abs(tool_y[0])
 
 
 def test_compute_wall_aware_approach_still_tilts_for_y_max_corner():

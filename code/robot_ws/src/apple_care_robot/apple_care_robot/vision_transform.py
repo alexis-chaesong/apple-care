@@ -57,7 +57,18 @@ UNKNOWN_FRUIT_DEPTH_OFFSET_MM = DEPTH_OFFSET_MM + 20
 
 # 변환 후 z가 이 값보다 낮게 나오면(예: depth 잡음/오탐으로 비정상적으로 얕게
 # 나온 경우) 이 값으로 클램프해서 로봇이 테이블을 뚫고 내려가는 것을 방지.
-MIN_Z_MM = 2.0
+#
+# 실측으로 확인된 문제: 예전 값(2.0)은 실제 작업대(트레이) 표면 높이(로봇 베이스
+# 좌표계 기준 z ≈ 13.3~13.53mm - wall_avoidance.py 상단 docstring의 트레이 모서리
+# 실측값 참고)보다 11mm 이상 낮았음. 즉 vision의 depth 오차로 z가 2~13mm 사이로
+# 잘못 계산되는 경우 이 클램프가 전혀 안 걸리고 그 값 그대로 movel 목표가 돼서,
+# 그리퍼가 실제 트레이 바닥보다 더 깊이 내려가려다 접촉/하드웨어 안전정지가
+# 반복 발생했음(특히 vision이 사과를 잘못 잡아 z를 과소평가한 경우). 실제 트레이
+# 표면 높이에 최소 여유(TRAY_SURFACE_CLEARANCE_MM)를 더한 값으로 클램프해서,
+# depth가 아무리 잘못 나와도 실제 표면보다 더 깊이는 못 내려가게 함.
+TRAY_SURFACE_Z_MM = 13.3  # wall_avoidance.py 트레이 모서리 실측값 중 더 낮은 쪽(보수적)
+TRAY_SURFACE_CLEARANCE_MM = 8.0  # 표면 위로 최소 이만큼은 띄워서, 접촉 감지(반발력 가드)가 반응할 여유를 남김
+MIN_Z_MM = TRAY_SURFACE_Z_MM + TRAY_SURFACE_CLEARANCE_MM
 
 _gripper2cam_matrix = None  # 파일 I/O를 매 호출마다 하지 않도록 캐시
 

@@ -124,13 +124,30 @@ def is_within_tray_bounds(x, y) -> bool:
     return TRAY_X_MIN_MM <= x <= TRAY_X_MAX_MM and TRAY_Y_MIN_MM <= y <= TRAY_Y_MAX_MM
 
 
-# "상단(후면)" 벽(y_max) 하나에만 가까운 경우(모서리 아님)는 실측 결과 다른 세 벽과
-# 달리 그리퍼를 기울이면 안 됨 - 이 벽 쪽에는 사과가 여러 개 나란히 놓이는 경우가
-# 많아서, tilt 때문에 옆으로 빠지는 hover 경로가 바로 옆 사과와 부딪힐 위험이 있음.
-# 그래서 이 벽만 "직선 접근"(기울이지 않고, hover 위치만 트레이 중심 쪽/위로 살짝
-# 띄움)으로 예외 처리함. 모서리(다른 벽과 동시에 가까움)는 기존처럼 기울임 -
-# 그 경우는 이미 실측으로 문제없이 확인됨.
-STRAIGHT_APPROACH_WALLS = frozenset({"y_max"})
+# 과거에는 "상단(후면)" 벽(y_max) 하나에만 가까운 경우(모서리 아님) 다른 세 벽과
+# 달리 그리퍼를 기울이지 않는 예외가 있었음(이 벽 쪽에 사과가 여러 개 나란히
+# 놓이는 경우 tilt로 인한 hover 경로가 옆 사과와 부딪힐 위험이 있다고 봤었음).
+# 실측 결과 이 벽(정면 벽)에서 예외 없이 기울여야 벽 충돌 회피가 제대로 동작하는
+# 것으로 확인되어 예외를 없앰 - 이제 네 벽 모두 동일하게 기울임/오프셋/inset이
+# 적용됨. 향후 특정 벽만 다시 예외 처리해야 하면 이 frozenset에 벽 이름을 추가.
+STRAIGHT_APPROACH_WALLS = frozenset()
+
+# 실측으로 확인된 문제: DEFAULT_PICK_ORIENTATION(모든 사과에 공통으로 쓰는 고정
+# 기본 자세) 기준 tool Y축이 base 좌표계에서 거의 X축 방향(≈(1,0,0))으로 고정돼
+# 있음. x_min/x_max 벽(법선이 base X 방향)은 이 덕분에 tool Y가 우연히 벽에
+# 수직으로 맞지만, y_min/y_max(정면/후면) 벽은 법선이 base Y 방향이라 tool Y가
+# 벽과 수직이 아니라 오히려 평행하게 나옴 - _tilt_orientation()의 10~22도 정도의
+# 작은 기울임만으로는 이 90도 차이를 메울 수 없음.
+#
+# ZYZ 오일러(rx,ry,rz)의 마지막 각도(rz)는 그리퍼 접근축(tool Z, 거의 수직) 기준
+# 회전이라 tool Z 방향은 그대로 두고 tool X/Y만 그 축 둘레로 돌릴 수 있음. 이를
+# 이용해 y_min/y_max 벽 근처(모서리 아닐 때)에서만 rz에 이 각도를 추가로 얹어서
+# tool Y가 base Y(그 벽들의 법선) 방향을 향하도록 보정한다.
+#
+# 부호(+90 vs -90)는 실기에서 반드시 눈으로 확인할 것 - 반대 방향으로 돌면 이
+# 값의 부호만 뒤집으면 됨(_tilt_orientation 기울임 방향과 동일한 튜닝 패턴).
+FRONT_BACK_YAW_WALLS = frozenset({"y_min", "y_max"})
+FRONT_BACK_YAW_DEG = -90.0
 
 
 def _nearest_wall_escape_dir(x, y):
@@ -263,9 +280,8 @@ def compute_wall_aware_approach(pick_pos, posx_factory):
         CORNER_APPROACH_HOVER_CLEARANCE_MM if is_corner else WALL_APPROACH_HOVER_CLEARANCE_MM
     )
 
-    # 상단(y_max) 벽 하나에만 가까운 경우는 기울이지 않고 "직선 접근"으로 예외
-    # 처리 - STRAIGHT_APPROACH_WALLS 정의 참고 (여러 사과가 나란히 놓이는 벽이라
-    # tilt로 인한 옆 이동이 이웃 사과와 부딪힐 위험이 있음). 모서리는 제외(그대로 기울임).
+    # STRAIGHT_APPROACH_WALLS 정의 참고 - 현재는 비어 있어 네 벽 모두 기울임이
+    # 적용되지만, 특정 벽만 다시 예외(직선 접근) 처리해야 할 경우를 위해 남겨둠.
     if not is_corner and close_walls <= STRAIGHT_APPROACH_WALLS:
         tilt_deg = 0.0
 
@@ -279,8 +295,16 @@ def compute_wall_aware_approach(pick_pos, posx_factory):
     else:
         pick_inset_mm = 0.0
 
+    # FRONT_BACK_YAW_WALLS 정의 참고 - y_min/y_max 벽 근처(모서리 아닐 때)는
+    # tool Y축이 벽과 평행하게 나오는 문제가 있어, 기울이기 전에 접근축(tool Z)
+    # 기준 rz에 요(yaw)를 먼저 얹어서 tool Y가 벽에 수직인 base Y 방향을
+    # 향하도록 보정한다.
+    base_rx, base_ry, base_rz = rx, ry, rz
+    if not is_corner and close_walls <= FRONT_BACK_YAW_WALLS:
+        base_rz = _wrap_deg(base_rz + FRONT_BACK_YAW_DEG)
+
     ex, ey = escape_dir
-    new_rx, new_ry, new_rz = _tilt_orientation((rx, ry, rz), escape_dir, tilt_deg)
+    new_rx, new_ry, new_rz = _tilt_orientation((base_rx, base_ry, base_rz), escape_dir, tilt_deg)
 
     hover_x = x + ex * lateral_offset_mm
     hover_y = y + ey * lateral_offset_mm
