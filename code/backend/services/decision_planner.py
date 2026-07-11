@@ -95,7 +95,12 @@ def decide(vision: VisionFeatureIn) -> DecisionResult:
 
     # 1) Vision 자체가 확신 못 하는 경우 - 정책/메모리와 무관하게 무조건 확인
     #    (기획서 12번 예외1: "AI가 확신하지 못하는 경우에는 강제로 분류하지 않는다")
-    if vision.confidence < settings.confidence_threshold:
+    #    단, candidates[0] == "small"(= mold/bruise/scratch 등 다른 결함이 전혀 안 걸리고
+    #    "작다"는 판정만 있는 경우)은 예외로 이 게이트를 건너뜀.
+    #    작은 사과를 가공용으로 보내는 오분류 리스크는 낮고, small 정책은 이미 충분히
+    #    학습되어 있는 경우가 많으므로, 그 경우까지 vision confidence 하나로 매번
+    #    막아서 계속 재확인시키지 않기로 함 (2단계 정책 신뢰도 체크는 그대로 거침)
+    if vision.confidence < settings.confidence_threshold and candidates[0] != "small":
         logger.info(
             "낮은 confidence(%.2f < %.2f)로 인해 ask_human 처리: fruit=%s",
             vision.confidence, settings.confidence_threshold, vision.fruit_type,
