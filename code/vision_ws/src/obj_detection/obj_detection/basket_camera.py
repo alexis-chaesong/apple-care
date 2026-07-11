@@ -85,6 +85,17 @@ DEFAULT_FRAME_HEIGHT = 720
 # 것을 막는다. (0.1초 간격 재시도이므로 10회 = 약 1초)
 STALE_FRAME_FAILURE_THRESHOLD = 10
 
+# 실측으로 확인된 문제: YOLO가 모션블러/순간적인 조명 변화 등으로 단 한
+# 프레임(0.05초)만 바스켓 박스를 놓쳐도 assign_baskets가 그 바스켓을 즉시
+# None으로 돌려버려서, compute_occupancy가 실제로는 사과가 있는 바스켓을
+# 그 찰나에 occupied=False로 잘못 publish하는 일이 있었음(화면으로는 4개
+# 다 항상 보이는데 로그에는 "3/4 감지"로 뜨는 것도 이 순간적 드롭 때문).
+# 그래서 바스켓 하나가 이 프레임 수만큼 연속으로 안 잡혀야만 진짜로 없는
+# 것으로 보고, 그 전까지는 마지막으로 실제 잡혔던 위치를 그대로 재사용한다.
+# (0.05초 주기 * 20회 = 약 1초 - 카메라 자체가 분리된 게 아니라 바스켓
+# 배치가 고정이라 1초 정도는 위치가 그대로라고 가정해도 안전함)
+STICKY_BASKET_MAX_MISSED_FRAMES = 20
+
 
 class WebcamCapture:
     """일반 V4L2 웹캠을 백그라운드 스레드에서 계속 읽어 최신 프레임만 들고 있는 헬퍼.
@@ -192,6 +203,32 @@ def assign_baskets(detections):
     return assignment, valid, basket_labels
 
 
+def apply_basket_stickiness(assignment, labels, last_assignment, last_labels, miss_counts):
+    """이번 프레임에서 못 잡힌 바스켓을, 연속으로 STICKY_BASKET_MAX_MISSED_FRAMES
+    프레임을 넘기기 전까지는 마지막으로 실제 잡혔던 위치/라벨로 대체해서
+    반환한다 (assign_baskets 자체는 순수하게 "이번 프레임에 뭐가 잡혔는지"만
+    보게 유지하고, 프레임 간 상태 보정은 이 함수에서 따로 담당).
+
+    반환값: (merged_assignment, merged_labels, valid, updated_miss_counts).
+    valid은 sticky 대체까지 포함해서 4개가 다 채워졌는지 여부."""
+    merged_assignment = dict(assignment)
+    merged_labels = dict(labels)
+    updated_miss_counts = dict(miss_counts)
+    for name in BASKET_NAMES:
+        if assignment[name] is not None:
+            updated_miss_counts[name] = 0
+            continue
+        updated_miss_counts[name] = miss_counts.get(name, 0) + 1
+        if (
+            updated_miss_counts[name] <= STICKY_BASKET_MAX_MISSED_FRAMES
+            and last_assignment.get(name) is not None
+        ):
+            merged_assignment[name] = last_assignment[name]
+            merged_labels[name] = last_labels[name]
+    valid = all(merged_assignment[name] is not None for name in BASKET_NAMES)
+    return merged_assignment, merged_labels, valid, updated_miss_counts
+
+
 def compute_occupancy(detections, basket_assignment, basket_labels):
     """바스켓 점유 여부 판단.
 
@@ -260,6 +297,13 @@ class BasketDetectionNode(Node):
         self.webcam = WebcamCapture(device_index, self.get_logger(), frame_width, frame_height)
         self.model = AppleStatusModel()
 
+        # apply_basket_stickiness가 프레임 간에 참조하는 상태 - 마지막으로
+        # "실제로" 잡혔던(sticky 대체가 아닌) 바스켓 위치/라벨과, 바스켓별
+        # 연속 미검출 프레임 수.
+        self._last_basket_assignment = {name: None for name in BASKET_NAMES}
+        self._last_basket_labels = {name: None for name in BASKET_NAMES}
+        self._basket_miss_counts = {name: 0 for name in BASKET_NAMES}
+
         self.status_pub = self.create_publisher(String, 'basket_status', 10)
         self.debug_image_pub = self.create_publisher(Image, 'basket_camera/debug_image', 10)
 
@@ -275,12 +319,26 @@ class BasketDetectionNode(Node):
             return
 
         detections = self.model.get_all_detections(frame)
-        basket_assignment, valid, basket_labels = assign_baskets(detections)
+        raw_assignment, _raw_valid, raw_labels = assign_baskets(detections)
+
+        # 이번 프레임에서 실제로 잡힌 바스켓만 "마지막으로 본 위치"로 갱신한다
+        # (sticky로 대체된 값을 다시 last로 저장하면 놓친 바스켓이 영영 안
+        # 잡혀도 계속 최신처럼 남기 때문에, 반드시 raw_assignment 기준으로만 갱신).
+        for name in BASKET_NAMES:
+            if raw_assignment[name] is not None:
+                self._last_basket_assignment[name] = raw_assignment[name]
+                self._last_basket_labels[name] = raw_labels[name]
+
+        basket_assignment, basket_labels, valid, self._basket_miss_counts = apply_basket_stickiness(
+            raw_assignment, raw_labels,
+            self._last_basket_assignment, self._last_basket_labels,
+            self._basket_miss_counts,
+        )
         occupancy = compute_occupancy(detections, basket_assignment, basket_labels)
 
         if not valid:
             self.get_logger().warn(
-                f"바스켓 4개를 전부 찾지 못함 - 감지된 개수: "
+                f"바스켓 4개를 전부 찾지 못함(sticky 대체 포함) - 감지된 개수: "
                 f"{sum(1 for b in basket_assignment.values() if b is not None)}/4"
             )
 
