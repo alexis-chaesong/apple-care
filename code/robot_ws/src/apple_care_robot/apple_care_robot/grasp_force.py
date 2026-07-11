@@ -35,14 +35,10 @@ FORCE_STEP = 50                 # 매 단계 힘 증가량 (openclose.py 레지�
 GRASP_FORCE_THRESHOLD = 3.0     # 손목 반발력 변화량(N)이 이 값을 넘으면 "제대로 눌렀다/잡았다"고 판단
 MAX_GRASP_STEPS = 6             # 무한 증가 방지 안전 장치 (6단계 * 50 = 300까지)
 
-# 실측으로 확인된 문제: 작은 사과는 기본 initial_force(100=10N)로 첫 닫기부터
-# 단번에 세게 조이면, 힘 감지 루프가 반응하기도 전에 사과가 옆으로 튕겨
-# 나가버림("그립을 닫는 순간 자체에서 바로 놓침"). 큰 사과와 달리 접촉 면적이
-# 작고 가벼워서 급격한 힘 인가에 더 취약함 - 그래서 condition="small"일 때는
-# 훨씬 작은 힘으로 시작해서, 더 촘촘한 단위로 올려가며 "막 저항이 생기는" 지점을
-# 놓치지 않게 함.
-SMALL_APPLE_INITIAL_FORCE = 40  # 작은 사과 첫 시도 힘 (0.1N 단위, =4N)
-SMALL_APPLE_FORCE_STEP = 20     # 작은 사과 힘 증가 단위 (0.1N 단위, =2N)
+# 작은 사과 전용으로 initial_force/force_step을 따로 낮춰봤으나 실측 결과
+# 개선이 없어서(threshold를 올리든 내리든 동일하게 놓침) 다시 일반 사과와
+# 동일한 값(DEFAULT_INITIAL_FORCE/FORCE_STEP)을 그대로 쓰기로 함 - condition은
+# 더 이상 힘 파라미터 선택에 영향을 주지 않음.
 
 # 접촉을 감지한 힘 그대로 이동하면 관성/미끄러짐으로 놓칠 수 있어서,
 # 감지 즉시 멈추는 대신 안전 여유분만큼 한 번 더 힘을 얹어줌.
@@ -182,13 +178,11 @@ def grasp_apple_with_force_feedback(
     Args:
         node: rclpy 노드 (로그 출력용)
         initial_force: 첫 시도 힘 (너무 낮으면 첫 시도에서는 못 잠글 수 있음).
-            None이면(기본값) condition에 따라 DEFAULT_INITIAL_FORCE 또는
-            SMALL_APPLE_INITIAL_FORCE를 자동으로 고름.
+            None이면(기본값) DEFAULT_INITIAL_FORCE를 씀.
         condition: vision/decision이 판별한 사과 상태("small"/"unknown"/그 외).
-            "small"이면 initial_force와 힘 증가 단위를 SMALL_APPLE_INITIAL_FORCE/
-            SMALL_APPLE_FORCE_STEP로 낮춰서 첫 닫기부터 세게 조여 사과가 튕겨
-            나가는 문제를 피함 (위 모듈 상수 주석 참고). initial_force를 직접
-            넘기면 이 자동 선택보다 우선함.
+            현재는 힘 파라미터 선택에 쓰이지 않음(일반 사과와 동일한 DEFAULT_
+            INITIAL_FORCE/FORCE_STEP을 그대로 씀) - 로그/호출부 하위 호환을
+            위해 인자만 남겨둠.
         emergency_stop_event: 넘겨주면(threading.Event), 매 단계 사이에 비상정지를
             감시함 - 걸려 있으면 즉시 safe_motion.EmergencyStopError를 던짐
             (호출부가 잡아서 복구해야 함). None이면(기본값) 감시하지 않음 - 이
@@ -214,10 +208,9 @@ def grasp_apple_with_force_feedback(
     """
     from DSR_ROBOT2 import get_tool_force, DR_BASE
 
-    is_small = condition == "small"
     if initial_force is None:
-        initial_force = SMALL_APPLE_INITIAL_FORCE if is_small else DEFAULT_INITIAL_FORCE
-    force_step = SMALL_APPLE_FORCE_STEP if is_small else FORCE_STEP
+        initial_force = DEFAULT_INITIAL_FORCE
+    force_step = FORCE_STEP
 
     node.get_logger().info(
         f'실시간 힘 감지 방식으로 사과 파지 시작 (condition={condition}, '
