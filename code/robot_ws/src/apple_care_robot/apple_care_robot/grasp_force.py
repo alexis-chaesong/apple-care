@@ -30,9 +30,19 @@ import time
 from apple_care_robot.openclose import gripper_close_with_force, GRIPPER_MAX_FORCE
 from apple_care_robot.safe_motion import raise_if_emergency_stop, make_hw_safety_watcher
 
+DEFAULT_INITIAL_FORCE = 100     # 기본 첫 시도 힘 (0.1N 단위, =10N)
 FORCE_STEP = 50                 # 매 단계 힘 증가량 (openclose.py 레지스터 단위, 0.1N = 5N)
 GRASP_FORCE_THRESHOLD = 3.0     # 손목 반발력 변화량(N)이 이 값을 넘으면 "제대로 눌렀다/잡았다"고 판단
 MAX_GRASP_STEPS = 6             # 무한 증가 방지 안전 장치 (6단계 * 50 = 300까지)
+
+# 실측으로 확인된 문제: 작은 사과는 기본 initial_force(100=10N)로 첫 닫기부터
+# 단번에 세게 조이면, 힘 감지 루프가 반응하기도 전에 사과가 옆으로 튕겨
+# 나가버림("그립을 닫는 순간 자체에서 바로 놓침"). 큰 사과와 달리 접촉 면적이
+# 작고 가벼워서 급격한 힘 인가에 더 취약함 - 그래서 condition="small"일 때는
+# 훨씬 작은 힘으로 시작해서, 더 촘촘한 단위로 올려가며 "막 저항이 생기는" 지점을
+# 놓치지 않게 함.
+SMALL_APPLE_INITIAL_FORCE = 40  # 작은 사과 첫 시도 힘 (0.1N 단위, =4N)
+SMALL_APPLE_FORCE_STEP = 20     # 작은 사과 힘 증가 단위 (0.1N 단위, =2N)
 
 # 접촉을 감지한 힘 그대로 이동하면 관성/미끄러짐으로 놓칠 수 있어서,
 # 감지 즉시 멈추는 대신 안전 여유분만큼 한 번 더 힘을 얹어줌.
@@ -162,7 +172,8 @@ def descend_to_pick_with_reaction_guard(
 
 
 def grasp_apple_with_force_feedback(
-    node, initial_force=100, *, emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
+    node, initial_force=None, *, condition=None,
+    emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
 ):
     """
     힘을 조금씩 올려가며, 손목 힘 센서로 감지된 반발력 기준으로
@@ -170,7 +181,14 @@ def grasp_apple_with_force_feedback(
 
     Args:
         node: rclpy 노드 (로그 출력용)
-        initial_force: 첫 시도 힘 (너무 낮으면 첫 시도에서는 못 잠글 수 있음)
+        initial_force: 첫 시도 힘 (너무 낮으면 첫 시도에서는 못 잠글 수 있음).
+            None이면(기본값) condition에 따라 DEFAULT_INITIAL_FORCE 또는
+            SMALL_APPLE_INITIAL_FORCE를 자동으로 고름.
+        condition: vision/decision이 판별한 사과 상태("small"/"unknown"/그 외).
+            "small"이면 initial_force와 힘 증가 단위를 SMALL_APPLE_INITIAL_FORCE/
+            SMALL_APPLE_FORCE_STEP로 낮춰서 첫 닫기부터 세게 조여 사과가 튕겨
+            나가는 문제를 피함 (위 모듈 상수 주석 참고). initial_force를 직접
+            넘기면 이 자동 선택보다 우선함.
         emergency_stop_event: 넘겨주면(threading.Event), 매 단계 사이에 비상정지를
             감시함 - 걸려 있으면 즉시 safe_motion.EmergencyStopError를 던짐
             (호출부가 잡아서 복구해야 함). None이면(기본값) 감시하지 않음 - 이
@@ -196,7 +214,15 @@ def grasp_apple_with_force_feedback(
     """
     from DSR_ROBOT2 import get_tool_force, DR_BASE
 
-    node.get_logger().info('실시간 힘 감지 방식으로 사과 파지 시작')
+    is_small = condition == "small"
+    if initial_force is None:
+        initial_force = SMALL_APPLE_INITIAL_FORCE if is_small else DEFAULT_INITIAL_FORCE
+    force_step = SMALL_APPLE_FORCE_STEP if is_small else FORCE_STEP
+
+    node.get_logger().info(
+        f'실시간 힘 감지 방식으로 사과 파지 시작 (condition={condition}, '
+        f'initial_force={initial_force}, force_step={force_step})'
+    )
 
     # emergency_stop_event가 없으면(하위 호환 호출부) check_hw_safety_stop이 있어도
     # 걸어둘 이벤트 자체가 없으므로 감시하지 않음.
@@ -239,14 +265,14 @@ def grasp_apple_with_force_feedback(
                     f'[grasp] 파지 확인됨 (힘={current_force}). '
                     f'미끄러짐 방지를 위해 안전 여유분을 추가로 얹습니다.'
                 )
-                current_force = min(GRIPPER_MAX_FORCE, current_force + FORCE_STEP * SAFETY_MARGIN_STEPS)
+                current_force = min(GRIPPER_MAX_FORCE, current_force + force_step * SAFETY_MARGIN_STEPS)
                 gripper_close_with_force(current_force)
                 node.get_logger().info(f'[grasp] 최종 적용 힘 (안전 여유분 포함): {current_force}')
                 return current_force, True
         else:
             node.get_logger().warn('[grasp] get_tool_force 읽기 실패 - 힘 값을 가져오지 못했습니다.')
 
-        current_force = min(GRIPPER_MAX_FORCE, current_force + FORCE_STEP)
+        current_force = min(GRIPPER_MAX_FORCE, current_force + force_step)
         gripper_close_with_force(current_force)
 
     node.get_logger().warn(
