@@ -349,6 +349,17 @@ class HITLStateMachine:
                 self._answer_future = None
                 async with self._lock:
                     self._current = None
+                # 세션이 살아있던 마지막 순간(예: set_skip_position() 직후 ~ 여기 사이)에
+                # vision 폴링이 이미 다른 사과를 감지해 큐잉을 시도했을 수 있는데,
+                # main.py의 _vla_consumer_loop는 "current_session is not None"이면
+                # 무조건 건너뛰므로(같은 사과 재감지로 간주) 그 감지 결과가 버려진다.
+                # 문제는 vision_bridge.py가 그 사실을 모르고 자체 dedup 캐시(_last_status/
+                # _last_position)를 이미 그 사과로 갱신해버려서, 이후 폴링에서 계속
+                # "이미 보고한 것과 동일"로 판정돼 다시는 큐에 안 들어가는 경우가 있었음
+                # (실제로 겪은 문제 - 다른 사과가 있는데도 세션 종료 후 로봇이 계속
+                # 가만히 있는 원인). force_redetect()로 캐시를 지워서 다음 폴링부터는
+                # 지금 보이는 걸 다시 "새로 감지된 것"으로 정상 큐잉하게 한다.
+                vision_bridge_manager.force_redetect()
                 await self._start_next_pending()
 
     async def _ask_and_wait(self, session: HITLSession) -> bool:

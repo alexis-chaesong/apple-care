@@ -30,9 +30,15 @@ import time
 from apple_care_robot.openclose import gripper_close_with_force, GRIPPER_MAX_FORCE
 from apple_care_robot.safe_motion import raise_if_emergency_stop, make_hw_safety_watcher
 
+DEFAULT_INITIAL_FORCE = 100     # 기본 첫 시도 힘 (0.1N 단위, =10N)
 FORCE_STEP = 50                 # 매 단계 힘 증가량 (openclose.py 레지스터 단위, 0.1N = 5N)
 GRASP_FORCE_THRESHOLD = 3.0     # 손목 반발력 변화량(N)이 이 값을 넘으면 "제대로 눌렀다/잡았다"고 판단
 MAX_GRASP_STEPS = 6             # 무한 증가 방지 안전 장치 (6단계 * 50 = 300까지)
+
+# 작은 사과 전용으로 initial_force/force_step을 따로 낮춰봤으나 실측 결과
+# 개선이 없어서(threshold를 올리든 내리든 동일하게 놓침) 다시 일반 사과와
+# 동일한 값(DEFAULT_INITIAL_FORCE/FORCE_STEP)을 그대로 쓰기로 함 - condition은
+# 더 이상 힘 파라미터 선택에 영향을 주지 않음.
 
 # 접촉을 감지한 힘 그대로 이동하면 관성/미끄러짐으로 놓칠 수 있어서,
 # 감지 즉시 멈추는 대신 안전 여유분만큼 한 번 더 힘을 얹어줌.
@@ -162,7 +168,8 @@ def descend_to_pick_with_reaction_guard(
 
 
 def grasp_apple_with_force_feedback(
-    node, initial_force=100, *, emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
+    node, initial_force=None, *, condition=None,
+    emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
 ):
     """
     힘을 조금씩 올려가며, 손목 힘 센서로 감지된 반발력 기준으로
@@ -170,7 +177,12 @@ def grasp_apple_with_force_feedback(
 
     Args:
         node: rclpy 노드 (로그 출력용)
-        initial_force: 첫 시도 힘 (너무 낮으면 첫 시도에서는 못 잠글 수 있음)
+        initial_force: 첫 시도 힘 (너무 낮으면 첫 시도에서는 못 잠글 수 있음).
+            None이면(기본값) DEFAULT_INITIAL_FORCE를 씀.
+        condition: vision/decision이 판별한 사과 상태("small"/"unknown"/그 외).
+            현재는 힘 파라미터 선택에 쓰이지 않음(일반 사과와 동일한 DEFAULT_
+            INITIAL_FORCE/FORCE_STEP을 그대로 씀) - 로그/호출부 하위 호환을
+            위해 인자만 남겨둠.
         emergency_stop_event: 넘겨주면(threading.Event), 매 단계 사이에 비상정지를
             감시함 - 걸려 있으면 즉시 safe_motion.EmergencyStopError를 던짐
             (호출부가 잡아서 복구해야 함). None이면(기본값) 감시하지 않음 - 이
@@ -196,7 +208,14 @@ def grasp_apple_with_force_feedback(
     """
     from DSR_ROBOT2 import get_tool_force, DR_BASE
 
-    node.get_logger().info('실시간 힘 감지 방식으로 사과 파지 시작')
+    if initial_force is None:
+        initial_force = DEFAULT_INITIAL_FORCE
+    force_step = FORCE_STEP
+
+    node.get_logger().info(
+        f'실시간 힘 감지 방식으로 사과 파지 시작 (condition={condition}, '
+        f'initial_force={initial_force}, force_step={force_step})'
+    )
 
     # emergency_stop_event가 없으면(하위 호환 호출부) check_hw_safety_stop이 있어도
     # 걸어둘 이벤트 자체가 없으므로 감시하지 않음.
@@ -239,14 +258,14 @@ def grasp_apple_with_force_feedback(
                     f'[grasp] 파지 확인됨 (힘={current_force}). '
                     f'미끄러짐 방지를 위해 안전 여유분을 추가로 얹습니다.'
                 )
-                current_force = min(GRIPPER_MAX_FORCE, current_force + FORCE_STEP * SAFETY_MARGIN_STEPS)
+                current_force = min(GRIPPER_MAX_FORCE, current_force + force_step * SAFETY_MARGIN_STEPS)
                 gripper_close_with_force(current_force)
                 node.get_logger().info(f'[grasp] 최종 적용 힘 (안전 여유분 포함): {current_force}')
                 return current_force, True
         else:
             node.get_logger().warn('[grasp] get_tool_force 읽기 실패 - 힘 값을 가져오지 못했습니다.')
 
-        current_force = min(GRIPPER_MAX_FORCE, current_force + FORCE_STEP)
+        current_force = min(GRIPPER_MAX_FORCE, current_force + force_step)
         gripper_close_with_force(current_force)
 
     node.get_logger().warn(

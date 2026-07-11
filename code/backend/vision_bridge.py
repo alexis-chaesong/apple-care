@@ -86,7 +86,7 @@ EMPTY_RESET_STREAK = 3
 # 작업자가 HITL 질문에 "무시해"로 답한 사과를 vision이 다시 최우선으로 고르지
 # 않도록 얼마나 오래 제외해둘지(초). 이 시간이 지나면 자동으로 제외를 풀어서
 # 다른 사과가 없으면 결국 이 사과도 다시 처리 대상이 됨 (영원히 방치되지 않게).
-SKIP_EXCLUDE_COOLDOWN_SEC = 60.0
+SKIP_EXCLUDE_COOLDOWN_SEC = 10.0
 
 # 실측으로 확인된 문제: YOLO 판정이 프레임마다 흔들려서, 흠집(apple_damaged)이
 # 종종 곰팡이(apple_rotten)로 잘못 튀는 등 확실한 분류값도 단 한 프레임만으로
