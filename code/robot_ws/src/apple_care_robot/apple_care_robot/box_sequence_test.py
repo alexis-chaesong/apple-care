@@ -864,7 +864,7 @@ def main(args=None):
                 # 미리 기록해둠 (estop_handler.py 참고).
                 estop_tracker.begin_pick_attempt(pick_pos)
                 picked_ok = pick_apple(
-                    node, pick_pos, do_safe_movel,
+                    node, pick_pos, do_safe_movel, condition=condition,
                     emergency_stop_event=emergency_stop, stop_node=comm_node,
                     check_hw_safety_stop=check_hw_safety_stop,
                 )

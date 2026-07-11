@@ -41,7 +41,7 @@ def _depth_offset_for_condition(condition):
 
 
 def pick_apple(
-    node, pick_pos, safe_movel_fn=None, *,
+    node, pick_pos, safe_movel_fn=None, *, condition=None,
     emergency_stop_event=None, stop_node=None, check_hw_safety_stop=None,
 ):
     """
@@ -54,6 +54,10 @@ def pick_apple(
     CAMERA 위치로 이동하는 것으로 대체함.
 
     Args:
+        condition: vision/decision이 판별한 사과 상태("small"/"unknown"/그 외).
+            grasp_apple_with_force_feedback()으로 그대로 전달되어, "small"이면
+            첫 파지 힘/증가 단위를 낮춰 첫 닫기부터 세게 조여 작은 사과가 튕겨
+            나가는 문제를 피함 (grasp_force.py의 SMALL_APPLE_INITIAL_FORCE 참고).
         safe_movel_fn: 호출부(box_sequence_test.py의 main())가 만들어서 넘겨주는,
             comm_node/emergency_stop 이벤트가 이미 묶여있는 이동 함수
             (safe_motion.safe_movel 참고). 비상정지가 걸리면 EmergencyStopError를
@@ -108,7 +112,8 @@ def pick_apple(
 
     node.get_logger().info('실시간 힘 감지로 그리퍼 닫기 (사과 크기에 맞춰 힘 자동 조절)')
     applied_force, picked_ok = grasp_apple_with_force_feedback(
-        node, emergency_stop_event=emergency_stop_event, stop_node=stop_node,
+        node, condition=condition,
+        emergency_stop_event=emergency_stop_event, stop_node=stop_node,
         check_hw_safety_stop=check_hw_safety_stop,
     )
     node.get_logger().info(f'최종 적용된 파지 힘: {applied_force} (파지 성공 여부: {picked_ok})')
