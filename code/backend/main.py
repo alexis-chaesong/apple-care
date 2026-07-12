@@ -29,7 +29,7 @@ from services.decision_planner import decide
 from services.voice_policy import run_voice_policy_command
 from state.hitl_state_machine import hitl_state_machine
 from stt_tts.wakeup_listener import wakeup_listener
-from routers import robot_router, vla_router, hitl_router
+from routers import robot_router, vla_router, hitl_router, decision_router
 
 
 logging.basicConfig(level="INFO", format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -166,10 +166,14 @@ async def _vla_consumer_loop() -> None:
 
     (Vision Feature -> Queue -> [여기] -> decide() -> execute or ask_human)
 
-    주의: decide() 자체는 동기 함수이고 DB 조회만 하므로 빠르다.
-    느릴 수 있는 LLM 호출은 ask_human 경로를 탈 때만 hitl_state_machine.handle_ask_human()이
-    별도 백그라운드 task로 실행하므로, 이 루프 자체는 절대 블로킹되지 않고
-    다음 vision_queue 항목을 계속 빠르게 소비할 수 있음.
+    주의: decide()는 대부분의 경로(정책 조회, Stage3 게이트)에서 순수 동기 DB
+    조회만 하므로 빠르지만, Track6부터 condition="unknown" 경로는 내부에서
+    실제 GPT-4o Vision 호출(await)을 할 수 있어 decide() 자체가 async 함수다.
+    이 루프가 그 호출이 끝날 때까지 다음 vision_queue 항목을 못 꺼내는 건
+    맞지만(같은 태스크 안에서 await하므로), unknown은 드문 경로이고 애초에
+    그 사과는 곧 HOLD로 로봇을 세울 것이므로 감수 가능한 지연이다. ask_human
+    경로의 TTS/STT 같은 나머지 느린 LLM 호출은 여전히
+    hitl_state_machine.handle_ask_human()이 별도 백그라운드 task로 실행한다.
     """
     print("VLA Queue consumer 루프 시작.", flush=True)
 
@@ -207,7 +211,15 @@ async def _vla_consumer_loop() -> None:
                 continue
 
             try:
-                result = decide(raw_feature)
+                # Track2/3: Stage3 EVPI 게이트가 필요로 하는 혼잡도 신호(§4.3.4)를
+                # hitl_state_machine에서 조회해 주입 - decision_planner.py는
+                # 오케스트레이션 레이어(hitl_state_machine)를 직접 import하지
+                # 않는 구조를 유지하기 위해 호출부인 여기서 값을 가져와 넘긴다.
+                result = await decide(
+                    raw_feature,
+                    n_t=hitl_state_machine.congestion_n,
+                    tau_hold_t=hitl_state_machine.congestion_tau_hold,
+                )
 
                 if result.action == "execute":
                     # 즉시 실행 가능한 경우 - 로봇팀 motion_planner_node.py가 구독하는
@@ -246,6 +258,7 @@ async def _vla_consumer_loop() -> None:
                         condition=result.condition,
                         vision_confidence=result.confidence,
                         position=result.position,
+                        audit_id=result.audit_id,
                     )
 
             except Exception:  # noqa: BLE001
@@ -356,6 +369,7 @@ app.add_middleware(
 app.include_router(robot_router.router)
 app.include_router(vla_router.router)
 app.include_router(hitl_router.router)
+app.include_router(decision_router.router)
 
 @app.get("/")
 def read_root():

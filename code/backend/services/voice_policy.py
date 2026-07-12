@@ -74,6 +74,15 @@ async def run_voice_policy_command(listen_timeout_sec: float = 8.0) -> dict:
       NO_POLICY       - LLM은 응답했지만 정책을 하나도 추출 못함(명령이 아닌 잡담 등)
     """
     async with mic_lock:
+        # 웨이크워드 감지 직후 아무 신호 없이 곧바로 녹음을 시작하면, 사람이
+        # "헬로 로키" 뒤에 쉼 없이 바로 명령을 이어 말하는 경우(자연스러운 발화
+        # 습관) 그 명령의 앞부분이 마이크 스트림 전환 지연(pyaudio->sounddevice
+        # 핸드오프, 실측 100ms+) 구간에 잘려서 녹음됨 - STT 자체는 성공해도
+        # "시작해"가 잘려서 다른 단어로 인식되거나 키워드 매칭에 실패하는 원인이었음.
+        # hitl_state_machine.py가 질문을 다 들려준 뒤에만 듣기 시작하는 것과 동일한
+        # 원칙으로, 아주 짧은 확인 멘트를 먼저 들려줘서 "지금부터 들을 준비가 됐다"는
+        # 신호를 명확히 준 뒤에 듣기 시작한다.
+        await tts_service.speak("네, 말씀하세요.")
         text = await stt_service.listen_once(timeout_sec=listen_timeout_sec)
         if text is None:
             await tts_service.speak("다시 말씀해 주세요.")

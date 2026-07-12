@@ -31,6 +31,22 @@ WS_URL = "ws://localhost:8000/ws/robot/status"
 DEFAULT_TIMEOUT_SEC = 15
 
 
+def get_decision_explain(audit_id: int) -> dict:
+    """
+    Track4(설명가능성): 특정 판정(tb_decision_audit 행)의 근거를 자연어로 설명받음.
+    GET /api/decision/{audit_id}/explain -> {"result": "SUCCESS", "explanation": str, "raw": dict}
+
+    audit_id가 없는 경우(404) 또는 LLM 호출 실패(502)면 requests.HTTPError를 던짐 -
+    호출부(dashboard.py)가 messagebox로 에러를 보여줘야 함.
+    """
+    resp = requests.get(
+        f"{BASE_URL}/api/decision/{audit_id}/explain",
+        timeout=DEFAULT_TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def post_vla_feedback(
     fruit_type: str, condition: str, raw_answer: str, session_id: Optional[str] = None
 ) -> dict:

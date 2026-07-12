@@ -163,8 +163,12 @@ class DecisionResult(BaseModel):
     destination: Optional[str] = None
     # action이 execute일 때만 값이 채워짐. 어느 박스로 보낼지
 
-    reason: Literal["rule_match", "memory_match", "low_confidence", "unknown_object"]
+    reason: Literal["risk_accept_execute", "low_confidence", "unknown_object"]
     # 왜 이런 판단이 나왔는지 근거. 로그/디버깅 및 데모 시연 설명용으로 중요
+    # Track2/3: execute 분기는 source(llm_policy/human_feedback)와 무관하게 항상
+    # "risk_accept_execute"다 - Stage3 게이트를 통과한 모든 execute는 EVPI_human <=
+    # Cost_human(t)이라는 위험 감수 판단의 결과이지, "규칙이라 무조건 신뢰"가 아니기 때문
+    # (예전 rule_match/memory_match 구분은 하드코딩 threshold 시절의 유물이라 제거됨).
 
     fruit_type: str
     condition: str
@@ -178,6 +182,12 @@ class DecisionResult(BaseModel):
     # decide()가 이 값을 만들어내지 않고 vision.center를 그대로 흘려보내기만 함 -
     # 로봇 쪽(Motion Planner)이 Pick pose를 계산하려면 반드시 필요한 정보라서,
     # execute/ask_human 두 경로 모두에서 유실 없이 채워야 함
+
+    audit_id: Optional[int] = None
+    # Track4(설명가능성): 이 판단이 tb_decision_audit에 기록된 행의 PK.
+    # HMI가 "왜?" 버튼으로 GET /api/decision/{audit_id}/explain을 호출할 때 씀.
+    # log_stage3_query_human/log_stage3_risk_accept_execute가 반환하는 audit_id를
+    # decision_planner._stage3_decide()가 그대로 여기 채워넣는다.
 
 
 class HoldCommand(BaseModel):

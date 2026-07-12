@@ -1173,8 +1173,9 @@ class VLASorterDashboard:
 
         fruit_type = payload.get("fruit_type", "unknown") 
         condition = payload.get("condition", "unknown") 
-        confidence = payload.get("confidence") or 0.0 
-        session_id = payload.get("session_id") 
+        confidence = payload.get("confidence") or 0.0
+        session_id = payload.get("session_id")
+        audit_id = payload.get("audit_id")  # Track4: "왜?" 버튼이 쓸 tb_decision_audit PK
 
         self.hitl_fruit_type = fruit_type
         self.hitl_condition = condition
@@ -1328,6 +1329,43 @@ class VLASorterDashboard:
             )
             _close_hitl_popup()
 
+        def show_explain():
+            # audit_id가 없으면(구버전 이벤트, 또는 payload=None인 로컬 테스트 팝업)
+            # 물어볼 대상 자체가 없으므로 조용히 안내만 하고 서버 호출은 안 함.
+            if audit_id is None:
+                messagebox.showinfo(
+                    "설명 불가", "이 판정에는 설명 조회용 ID(audit_id)가 없습니다.",
+                    parent=hitl_win if hitl_win.winfo_exists() else self.root,
+                )
+                return
+
+            self.log_message(f"[Explain] audit_id={audit_id} 설명 요청 중...")
+
+            def worker():
+                try:
+                    result = client.get_decision_explain(audit_id)
+                    explanation = result.get("explanation", "(설명 없음)")
+
+                    def on_success():
+                        messagebox.showinfo(
+                            f"판정 근거 설명 (audit_id={audit_id})", explanation,
+                            parent=hitl_win if hitl_win.winfo_exists() else self.root,
+                        )
+
+                    self.root.after(0, on_success)
+                except requests.exceptions.RequestException as exc:
+                    error_text = str(exc)
+
+                    def on_error():
+                        messagebox.showerror(
+                            "설명 조회 실패", f"서버 요청 실패: {error_text}",
+                            parent=hitl_win if hitl_win.winfo_exists() else self.root,
+                        )
+
+                    self.root.after(0, on_error)
+
+            threading.Thread(target=worker, daemon=True).start()
+
         btn_box = tk.Frame(left_panel, bg=self.COLOR_BG)
         btn_box.pack(fill="x", pady=5)
 
@@ -1343,7 +1381,13 @@ class VLASorterDashboard:
             btn_box, text="무시\n(다음 사과)", bg=self.COLOR_TEXT_MUTED, fg="white", activebackground=self.COLOR_TEXT_MUTED,
             bd=0, relief="flat", font=self.FONT_BODY_BOLD, width=7, pady=10, cursor="hand2", command=manual_skip,
         )
-        btn_skip.pack(side="left", padx=3, expand=True, fill="x") 
+        btn_skip.pack(side="left", padx=3, expand=True, fill="x")
+
+        btn_explain = tk.Button(
+            btn_box, text="왜?", bg=self.COLOR_TEXT_DIM, fg="white", activebackground=self.COLOR_TEXT_DIM,
+            bd=0, relief="flat", font=self.FONT_BODY_BOLD, width=4, pady=10, cursor="hand2", command=show_explain,
+        )
+        btn_explain.pack(side="left", padx=3)
 
     def on_closing(self):
         self.ws_client.stop()

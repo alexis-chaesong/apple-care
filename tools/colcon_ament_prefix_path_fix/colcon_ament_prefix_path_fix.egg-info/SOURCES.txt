@@ -1,0 +1,10 @@
+setup.py
+colcon_ament_prefix_path_fix/__init__.py
+colcon_ament_prefix_path_fix.egg-info/PKG-INFO
+colcon_ament_prefix_path_fix.egg-info/SOURCES.txt
+colcon_ament_prefix_path_fix.egg-info/dependency_links.txt
+colcon_ament_prefix_path_fix.egg-info/entry_points.txt
+colcon_ament_prefix_path_fix.egg-info/top_level.txt
+colcon_ament_prefix_path_fix.egg-info/zip-safe
+colcon_ament_prefix_path_fix/environment/__init__.py
+colcon_ament_prefix_path_fix/environment/ament_prefix_path.py

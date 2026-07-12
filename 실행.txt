@@ -6,12 +6,6 @@ alias obd='ros2 run obj_detection object_detection'
 alias pos_c='ros2 run obj_detection object_detection'
 alias acr='ros2 run apple_care_robot box_sequence_test'
 
-#---------------------------------------------------------------------------------
-# second 카메라
-# v4l2-stl --list-device 를 사용하여 로지텍 카메라의 인덱스를 반드시 확인 후 설정
-alias sec_c='ros2 run obj_detection basket_camera --ros-args -p device_index:=39'
-# --------------------------------------------------------------------------------
-
 # 넣기 전에 폴더 경로 확인하세요 꼭!!!!! - 본인 상황에 맞게 수정할 것
 # for p2
 function p2(){
@@ -21,17 +15,7 @@ function p2(){
   [ -f ~/apple-care/code/robot_ws/install/setup.bash ] && source ~/apple-care/code/robot_ws/install/setup.bash
 }
 
-# vision_ws - 앞에 경로 본인 상황에 맞게 수정할 것
-cd ~/apple-care/code/vision_ws && colcon build --symlink-install
-source install/setup.bash
-
-# robot_ws - 앞에 경로 본인 상황에 맞게 수정할 것
-cd ~/apple-care/code/robot_ws && colcon build --symlink-install
-source install/setup.bash
-
 다음 순으로 하면 됨
-
-# 터미널 7개
 
 # 확인할 것:
 # 로봇팔 소스 작업 선행!!!! (매우 중요)
@@ -40,19 +24,22 @@ source install/setup.bash
 로봇패키지 소스
 roboton 아니면 bring_rg
 
-# 하고 나서 p2 하면 둘다 소스 처리됨
-
 # realsense
 realsense
-sec_c
 
 # 카메라 위치로 이동
 pos_c
 
-# 이거한거 pos_c 종료 확인 뒤에
-obd 먼저 하고
-acr
+# vision_ws - 앞에 경로 본인 상황에 맞게 수정할 것
+cd ~/apple-care/code/vision_ws && colcon build --symlink-install
+source install/setup.bash
+
+# robot_ws - 앞에 경로 본인 상황에 맞게 수정할 것
+cd ~/apple-care/code/robot_ws && colcon build --symlink-install
+source install/setup.bash
+
+# 하고 나서 p2 하면 둘다 소스 처리됨
 
 # 이후
-bck
-fr
+obd 먼저 하고
+acr
