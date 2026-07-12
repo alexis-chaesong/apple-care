@@ -33,11 +33,25 @@ import cv2
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String, Bool  # 실제 로봇 상태 토픽 메시지 타입에 맞게 조정 가능
 from cv_bridge import CvBridge
 
 logger = logging.getLogger(__name__)
+
+# status_bus.py(robot_ws)와 반드시 동일해야 함 - process_state/gripper_status는
+# "현재 상태 하나"를 나타내는 latched 토픽이라 발행 측을 TRANSIENT_LOCAL로 바꿨어도
+# 구독 측이 기존 기본(VOLATILE)로 남아있으면 늦게 붙는 구독자는 여전히 과거 발행분을
+#못 받는다(DDS 규칙상 구독자가 요청하는 durability 이상을 발행자가 제공해야 replay됨).
+# 2026-07-11 실측 재현: 백엔드 재시작 후 이 값이 없어 READY를 영구히 놓치고
+# _vla_consumer_loop가 멈춰있었음 - PAUSE/RESUME 강제 재발행으로만 우회 가능했음.
+_LATCHED_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
 
 ROS_NODE_NAME = "fastapi_robot_bridge"
 
@@ -167,7 +181,7 @@ class RobotBridgeManager:
             String,
             TOPIC_PROCESS_STATE,
             self._process_state_callback,
-            10,
+            _LATCHED_QOS,
         )
         self.motion_status_sub = self.node.create_subscription(
             String,
@@ -195,7 +209,7 @@ class RobotBridgeManager:
             Bool,
             TOPIC_GRIPPER_STATUS,
             self._gripper_status_callback,
-            10,
+            _LATCHED_QOS,
         )
 
         # obj_detection의 디버그 이미지(인식결과 오버레이) 구독 -> HMI 실시간 모니터링용

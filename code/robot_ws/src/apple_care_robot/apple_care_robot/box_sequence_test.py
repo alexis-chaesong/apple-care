@@ -44,8 +44,11 @@ box_sequence_test.py는 백엔드 없이 로컬 vision 호출만으로 도는 �
 pick_apple()/_depth_offset_for_condition() 같은 공용 함수만 남아있음.
 """
 
+import atexit
 import json
+import os
 import queue
+import sys
 import threading
 
 import rclpy
@@ -71,6 +74,57 @@ ROBOT_MODEL = "m0609"
 
 DR_init.__dsr__id = ROBOT_ID
 DR_init.__dsr__model = ROBOT_MODEL
+
+# 중복 실행 방지용 pidfile. 2026-07-11 실측 사고: 같은 ROS2 노드 이름
+# (/dsr01/box_sequence_test)의 인스턴스가 실수로 두 개 동시에 떠서 ROS2가 이름
+# 충돌 경고를 냈고, 둘 다 /robot/command를 구독하고 있어 START 한 번에 두
+# 인스턴스가 동시에 같은 물리 로봇에 이중으로 명령을 보낼 뻔한 위험이 있었음
+# (그날은 오래된 인스턴스가 로봇 컨트롤 스택보다 먼저 떠서 죽어있었던 덕에 실제
+# 충돌은 없었지만, 그건 운이었을 뿐 보장된 안전이 아니었음).
+PIDFILE_PATH = "/tmp/apple_care_box_sequence_test.pid"
+
+
+def _acquire_pidfile_lock() -> None:
+    """이미 실행 중인 인스턴스가 있으면 물리 이동을 전혀 시작하지 않고 즉시 종료.
+
+    반드시 rclpy.init()/DSR 연결 등 어떤 초기화보다도 먼저(main() 맨 앞에서)
+    호출해야 한다 - 중복 인스턴스를 막는 목적 자체가 "그리퍼 오픈이나 로봇 이동
+    같은 물리 동작이 시작되기 전에 걸러내는 것"이기 때문.
+    """
+    if os.path.exists(PIDFILE_PATH):
+        with open(PIDFILE_PATH) as f:
+            old_pid_str = f.read().strip()
+        old_pid_alive = False
+        if old_pid_str.isdigit():
+            old_pid = int(old_pid_str)
+            try:
+                os.kill(old_pid, 0)  # 시그널 0: 실제로 죽이지 않고 살아있는지만 확인
+            except OSError:
+                pass  # 죽은 프로세스가 남긴 낡은 pidfile - 무시하고 아래에서 덮어씀
+            else:
+                old_pid_alive = True
+        if old_pid_alive:
+            print(
+                f"[FATAL] box_sequence_test가 이미 실행 중입니다 (PID={old_pid}). "
+                "같은 물리 로봇에 중복으로 명령을 보낼 위험이 있어 실행을 차단합니다. "
+                f"기존 프로세스를 먼저 종료하세요: kill {old_pid}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    with open(PIDFILE_PATH, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(_release_pidfile_lock)
+
+
+def _release_pidfile_lock() -> None:
+    try:
+        if os.path.exists(PIDFILE_PATH):
+            with open(PIDFILE_PATH) as f:
+                if f.read().strip() == str(os.getpid()):
+                    os.remove(PIDFILE_PATH)
+    except OSError:
+        pass
 
 TOPIC_DECISION_RESULT = "/decision/result"
 TOPIC_ROBOT_COMMAND = "/robot/command"
@@ -142,6 +196,8 @@ WORKTABLE_FORCE_START_CLEARANCE_MM = 60
 
 
 def main(args=None):
+    _acquire_pidfile_lock()
+
     rclpy.init(args=args)
     node = rclpy.create_node("box_sequence_test", namespace=ROBOT_ID)
     DR_init.__dsr__node = node

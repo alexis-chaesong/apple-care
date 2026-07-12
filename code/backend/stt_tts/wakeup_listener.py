@@ -54,6 +54,7 @@ from openwakeword.model import Model
 from scipy.signal import resample_poly
 
 from config import settings
+from stt_tts.mic_device import resolve_pyaudio_device
 from stt_tts.mic_lock import mic_lock
 
 logger = logging.getLogger(__name__)
@@ -108,12 +109,16 @@ class WakeupWord:
 
 
 def _open_stream(audio: "pyaudio.PyAudio", native_rate: int, chunk: int) -> "pyaudio.Stream":
+    # 인덱스가 흔들리는 환경(mic_device.py 참고) 대비, 스트림을 열 때마다 매번 다시 찾음
+    device_index = resolve_pyaudio_device(
+        audio, settings.wakeword_mic_device_name, settings.wakeword_mic_device_index
+    )
     return audio.open(
         format=pyaudio.paInt16,
         channels=1,
         rate=native_rate,
         input=True,
-        input_device_index=settings.wakeword_mic_device_index,
+        input_device_index=device_index,
         frames_per_buffer=chunk,
     )
 
@@ -161,7 +166,16 @@ class WakeupListener:
                     await asyncio.sleep(LOCK_POLL_INTERVAL_SEC)
                     continue
 
-                stream = await asyncio.to_thread(_open_stream, audio, native_rate, wakeup.chunk)
+                try:
+                    stream = await asyncio.to_thread(_open_stream, audio, native_rate, wakeup.chunk)
+                except Exception:  # noqa: BLE001
+                    # 장치 인덱스가 흔들리는 환경(mic_device.py)에서 스트림 열기가 실패해도
+                    # 태스크 자체가 조용히 죽지 않도록 함(예전엔 여기서 예외가 그대로
+                    # 전파돼 asyncio.create_task로 던진 백그라운드 태스크가 로그 없이
+                    # 멈춰버렸음 - 웨이크워드가 "전혀" 인식 안 되는 원인 중 하나였음)
+                    logger.error("웨이크워드 마이크 스트림 열기 실패 - 재시도", exc_info=True)
+                    await asyncio.sleep(LOCK_POLL_INTERVAL_SEC)
+                    continue
                 detected = False
                 try:
                     while not self._stop_event.is_set() and not mic_lock.locked():

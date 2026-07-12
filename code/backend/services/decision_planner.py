@@ -180,7 +180,7 @@ def _stage3_decide(
             "fruit=%s condition=%s policy=%s",
             evpi, cost, fruit_type, condition, policy,
         )
-        log_stage3_query_human(
+        audit_id = log_stage3_query_human(
             vision_for_audit, condition,
             theta_exists=policy is not None,
             dstored=policy["destination"] if policy else None,
@@ -194,6 +194,7 @@ def _stage3_decide(
             condition=condition,
             confidence=vision.confidence,
             position=vision.center,
+            audit_id=audit_id,
         )
         return result, query_human, evpi, cost
 
@@ -205,7 +206,7 @@ def _stage3_decide(
         "Stage3 게이트: 위험 감수 실행 (EVPI=%.2f <= Cost=%.2f): fruit=%s condition=%s destination=%s",
         evpi, cost, fruit_type, condition, policy["destination"],
     )
-    log_stage3_risk_accept_execute(
+    audit_id = log_stage3_risk_accept_execute(
         vision_for_audit, condition, policy["destination"],
         evpi_human=evpi, cost_human=cost, n_pending=n_t, tau_hold_sec=tau_hold_t,
     )
@@ -217,6 +218,7 @@ def _stage3_decide(
         condition=condition,
         confidence=vision.confidence,
         position=vision.center,
+        audit_id=audit_id,
     )
     return result, query_human, evpi, cost
 
@@ -326,7 +328,7 @@ async def decide(vision: VisionFeatureIn, n_t: int = 0, tau_hold_t: float = 0.0)
             vision.confidence, settings.confidence_threshold, vision.fruit_type,
         )
         audit_policy = get_policy(vision.fruit_type, candidates[0])
-        log_stage3_query_human(
+        audit_id = log_stage3_query_human(
             vision, candidates[0],
             theta_exists=audit_policy is not None,
             dstored=audit_policy["destination"] if audit_policy else None,
@@ -339,6 +341,7 @@ async def decide(vision: VisionFeatureIn, n_t: int = 0, tau_hold_t: float = 0.0)
             condition=candidates[0],
             confidence=vision.confidence,
             position=vision.center,
+            audit_id=audit_id,
         )
 
     # 2) 매칭되는 정책 조회

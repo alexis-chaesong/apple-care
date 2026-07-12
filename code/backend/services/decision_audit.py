@@ -353,6 +353,16 @@ def log_stage3_human_resolved(
     posterior 갱신 전/후 필드는 "사람이 답변한 경우만 값이 채워지고, 그 외엔
     null"이라는 요청대로 이 분기에서만 채워진다 (다른 log_* 함수는 이 인자들을
     받지 않아 항상 NULL로 저장됨).
+
+    actual_label(Track5 Calibration 준비): 사람의 답(destination)을 "잠정 정답"으로
+    간주해 그대로 기록한다. append-only 원칙상 이 판정을 유발한 원본
+    stage3_query_human 행을 소급 수정할 수는 없으므로(그 행에는 영원히
+    actual_label=NULL로 남음), 결과가 확정되는 이 시점의 행에 기록하는 것으로
+    "사람이 검토한 사례에는 최소 하나의 정답 라벨이 어딘가에 남는다"를 보장한다.
+    한계: risk_accept_execute(사람에게 안 묻고 자동 실행)는 애초에 사람 확인이
+    없으므로 이 함수가 호출되지 않고, 그런 행들의 actual_label은 계속 NULL로
+    남는다 - "자동 실행된 판정은 사후 검증 수단이 없다"는 사실 자체가 정확히
+    반영되는 것이지 버그가 아니다.
     """
     return _insert_audit_row(
         branch=BRANCH_STAGE3_HUMAN_RESOLVED,
@@ -369,6 +379,7 @@ def log_stage3_human_resolved(
         beta_before=beta_before,
         alpha_after=alpha_after,
         beta_after=beta_after,
+        actual_label=destination,
         session_id=session_id,
     )
 

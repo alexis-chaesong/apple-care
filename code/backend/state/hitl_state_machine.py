@@ -82,6 +82,12 @@ class HITLSession:
     hold_started_at: Optional[float] = None
     # §4.3.4 tau_hold(t) 계산용 - _run_session()이 실제로 HOLD를 발행하는
     # 시점에 채워짐. _pending 큐에 쌓여있는 동안(아직 HOLD 미발행)은 None.
+    audit_id: Optional[int] = None
+    # Track4(설명가능성): 이 질문을 유발한 tb_decision_audit 행의 PK.
+    # decision_planner._stage3_decide()가 log_stage3_query_human()에서 받은 값을
+    # DecisionResult.audit_id로 흘려보내고, main.py가 handle_ask_human()에 넘겨준다.
+    # VLA_ASK_HUMAN 브로드캐스트에 실어 HMI가 "왜?" 버튼으로 GET
+    # /api/decision/{audit_id}/explain을 호출할 수 있게 함.
 
 
 class HITLStateMachine:
@@ -93,7 +99,7 @@ class HITLStateMachine:
     def __init__(self) -> None:
         self._current: Optional[HITLSession] = None
         self._answer_future: Optional[asyncio.Future] = None
-        self._pending: deque[tuple[str, str, float, Optional[list[float]]]] = deque()
+        self._pending: deque[tuple[str, str, float, Optional[list[float]], Optional[int]]] = deque()
         self._lock = asyncio.Lock()
         # _lock: _current와 _pending을 동시에 여러 코루틴이 건드리는 것을 방지.
         # (예: consumer loop가 새 ask_human을 넣는 동시에 세션 종료 처리가 겹치는 경우)
@@ -107,6 +113,7 @@ class HITLStateMachine:
         condition: str,
         vision_confidence: float,
         position: Optional[list[float]] = None,
+        audit_id: Optional[int] = None,
     ) -> None:
         """
         decision_planner.decide()가 action="ask_human"을 반환했을 때 호출.
@@ -118,6 +125,9 @@ class HITLStateMachine:
         전달받아 세션에 보관함 - 답변이 해석된 뒤 이 좌표 없이 RESUME만 보내면
         로봇이 실제로 어느 사과를 어디로 옮겨야 하는지 알 수 없어 아무 동작도
         하지 않는 문제가 있었음 (아래 _ask_and_wait 참고).
+
+        audit_id: DecisionResult.audit_id(Track4) - VLA_ASK_HUMAN 브로드캐스트에
+        실어 HMI가 "왜?" 버튼으로 이 판정의 설명을 조회할 수 있게 함.
         """
         async with self._lock:
             if self._current is not None:
@@ -125,13 +135,14 @@ class HITLStateMachine:
                     "HITL 세션 진행 중, 대기열에 추가: fruit=%s condition=%s",
                     fruit_type, condition,
                 )
-                self._pending.append((fruit_type, condition, vision_confidence, position))
+                self._pending.append((fruit_type, condition, vision_confidence, position, audit_id))
                 return
             self._current = HITLSession(
                 fruit_type=fruit_type,
                 condition=condition,
                 vision_confidence=vision_confidence,
                 position=position,
+                audit_id=audit_id,
             )
 
         asyncio.create_task(self._run_session())
@@ -279,6 +290,10 @@ class HITLStateMachine:
                 # depth-only 블롭 검출 결과라 이 좌표가 "왜 미확인 물체로 판단했는지"의
                 # 근거 자체임).
                 "position": session.position,
+                # Track4: HMI "왜?" 버튼이 GET /api/decision/{audit_id}/explain을
+                # 호출할 때 쓰는 키. None이면(구버전 audit_id 없이 들어온 경우 등)
+                # 프론트가 버튼을 비활성화해야 함.
+                "audit_id": session.audit_id,
             },
             "timestamp": time.time(),
         })
@@ -544,10 +559,10 @@ class HITLStateMachine:
         async with self._lock:
             if not self._pending or self._current is not None:
                 return
-            fruit_type, condition, confidence, position = self._pending.popleft()
+            fruit_type, condition, confidence, position, audit_id = self._pending.popleft()
             self._current = HITLSession(
                 fruit_type=fruit_type, condition=condition, vision_confidence=confidence,
-                position=position,
+                position=position, audit_id=audit_id,
             )
 
         if settings.hitl_batch_grace_sec > 0:

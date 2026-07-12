@@ -183,6 +183,12 @@ class DecisionResult(BaseModel):
     # 로봇 쪽(Motion Planner)이 Pick pose를 계산하려면 반드시 필요한 정보라서,
     # execute/ask_human 두 경로 모두에서 유실 없이 채워야 함
 
+    audit_id: Optional[int] = None
+    # Track4(설명가능성): 이 판단이 tb_decision_audit에 기록된 행의 PK.
+    # HMI가 "왜?" 버튼으로 GET /api/decision/{audit_id}/explain을 호출할 때 씀.
+    # log_stage3_query_human/log_stage3_risk_accept_execute가 반환하는 audit_id를
+    # decision_planner._stage3_decide()가 그대로 여기 채워넣는다.
+
 
 class HoldCommand(BaseModel):
     # 백엔드가 robot_bridge.publish_command()를 통해 ROS로 내려보낼 HOLD/RESUME 명령 규격

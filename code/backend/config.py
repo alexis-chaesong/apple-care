@@ -273,6 +273,16 @@ class Settings:
     # 기본값으로 가져옴. 마이크 장치가 바뀌면 pyaudio.PyAudio().get_device_info_by_index(i)로
     # 재확인 후 .env의 WAKEWORD_MIC_DEVICE_INDEX만 수정하면 됨
 
+    wakeword_mic_device_name: Optional[str] = field(
+        default_factory=lambda: os.getenv("WAKEWORD_MIC_DEVICE_NAME") or None
+    )
+    # wakeword_mic_device_name: PipeWire가 오디오를 관리하는 환경(2026-07-11 확인된
+    # Humble 노트북)에서는 ALSA raw 서브디바이스의 장치 인덱스가 마이크 잭 감지/재연결
+    # 때마다 바뀌어 wakeword_mic_device_index를 고정해도 다시 어긋남. 이 값이 설정되면
+    # 매번 스트림을 열기 직전에 이름으로 장치를 다시 찾아 씀(예: "pulse") - 인덱스가
+    # 흔들려도 안정적으로 동작함. 미설정 시(기존 환경) wakeword_mic_device_index를
+    # 그대로 사용해 기존 동작은 바뀌지 않음 (stt_tts/mic_device.py 참고)
+
     wakeword_mic_native_rate: int = field(
         default_factory=lambda: int(os.getenv("WAKEWORD_MIC_NATIVE_RATE", "48000"))
     )
@@ -298,6 +308,13 @@ class Settings:
     # pyaudio(ALSA hw 인덱스) 기준이고 이건 sounddevice(PortAudio) 기준이라 번호 체계가
     # 다를 수 있으나, 지금까지 확인된 실제 하드웨어에서는 둘 다 index 4로 동일함
     # (scripts/check_mic_level.py로 재확인 가능)
+
+    stt_mic_device_name: Optional[str] = field(
+        default_factory=lambda: os.getenv("STT_MIC_DEVICE_NAME") or None
+    )
+    # stt_mic_device_name: wakeword_mic_device_name과 동일한 이유(PipeWire 환경에서
+    # 장치 인덱스가 흔들림)로 존재. 설정되면 stt_service.py가 녹음 직전마다 이름으로
+    # 장치를 다시 찾음. 미설정 시 stt_mic_device_index를 그대로 사용
 
     stt_mic_native_rate: int = field(
         default_factory=lambda: int(os.getenv("STT_MIC_NATIVE_RATE", "48000"))

@@ -29,7 +29,7 @@ from services.decision_planner import decide
 from services.voice_policy import run_voice_policy_command
 from state.hitl_state_machine import hitl_state_machine
 from stt_tts.wakeup_listener import wakeup_listener
-from routers import robot_router, vla_router, hitl_router
+from routers import robot_router, vla_router, hitl_router, decision_router
 
 
 logging.basicConfig(level="INFO", format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -258,6 +258,7 @@ async def _vla_consumer_loop() -> None:
                         condition=result.condition,
                         vision_confidence=result.confidence,
                         position=result.position,
+                        audit_id=result.audit_id,
                     )
 
             except Exception:  # noqa: BLE001
@@ -368,6 +369,7 @@ app.add_middleware(
 app.include_router(robot_router.router)
 app.include_router(vla_router.router)
 app.include_router(hitl_router.router)
+app.include_router(decision_router.router)
 
 @app.get("/")
 def read_root():

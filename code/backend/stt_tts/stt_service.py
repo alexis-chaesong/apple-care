@@ -37,6 +37,7 @@ from openai import AsyncOpenAI, APITimeoutError
 from scipy.signal import resample_poly
 
 from config import settings
+from stt_tts.mic_device import resolve_sd_device
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +62,14 @@ def _record_blocking(duration_sec: float, native_rate: int) -> np.ndarray:
     반환해서 Whisper가 계속 "you"로만 인식했음. listen_once()가 이후 resample_poly로
     Whisper용 sample_rate(기본 16000)로 다운샘플링함.
     """
-    logger.info("마이크 녹음 시작 (%.1f초, %dHz)", duration_sec, native_rate)
+    device = resolve_sd_device(settings.stt_mic_device_name, settings.stt_mic_device_index)
+    logger.info("마이크 녹음 시작 (%.1f초, %dHz, device=%s)", duration_sec, native_rate, device)
     recording = sd.rec(
         int(duration_sec * native_rate),
         samplerate=native_rate,
         channels=1,
         dtype="int16",
-        device=settings.stt_mic_device_index,
+        device=device,
     )
     sd.wait()  # 녹음이 끝날 때까지 이 스레드 안에서만 대기 (메인 루프는 영향 없음)
     logger.info("마이크 녹음 종료")

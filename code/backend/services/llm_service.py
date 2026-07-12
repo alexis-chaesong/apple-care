@@ -158,6 +158,33 @@ async def generate_unknown_question(fruit_guess: Optional[str] = None) -> str:
     return question
 
 
+async def explain_decision(audit_row: dict) -> str:
+    """
+    Track4(설명가능성): tb_decision_audit 행 하나를 사람이 읽을 수 있는 한국어
+    설명으로 변환.
+
+    이 함수는 판단이나 숫자 계산을 전혀 하지 않는다 - decision_audit.
+    get_audit_log_by_id()가 이미 DB에서 조회해온 실제 값만 프롬프트에
+    그대로 주입하고, "이 값만 사용해서 설명하라"고 명시적으로 강제한다.
+    LLM이 EVPI/Cost/alpha/beta 등 숫자를 스스로 지어내지 못하게 막는 것이
+    이 함수의 핵심 목적 - 순수하게 "이미 결정된 숫자 -> 자연어 설명" 번역만 담당.
+    """
+    system_prompt = (
+        "너는 로봇 분류 시스템의 판정 근거를 작업자에게 설명하는 역할이다. "
+        "사용자 메시지에 JSON으로 주어지는 실제 판정 기록의 값만 사용해서 "
+        "왜 이렇게 판단했는지 2~4문장의 한국어로 설명해라. "
+        "절대 새로운 숫자를 만들어내거나 주어지지 않은 값을 추측하지 마라 - "
+        "값이 null이면 그 항목은 '해당 없음'으로만 언급하거나 생략해라. "
+        '{"explanation": string} 형태의 JSON으로만 출력해라.'
+    )
+    user_prompt = json.dumps(audit_row, ensure_ascii=False, default=str)
+    result = await _call_json(system_prompt, user_prompt)
+    explanation = result.get("explanation")
+    if not explanation:
+        raise LLMParseError(f"explanation 필드가 없음: {result}")
+    return explanation
+
+
 async def interpret_human_answer(raw_answer: str) -> dict:
     """
     STT로 받은 사람의 답변을 destination으로 분류.
