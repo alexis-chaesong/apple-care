@@ -138,24 +138,19 @@ async def generate_unknown_question(fruit_guess: Optional[str] = None) -> str:
     fruit_guess: Vision이 완전히 확신은 못 해도 어느 정도 추정한 이름이 있으면 전달
                  (예: YOLO가 "kiwi일 가능성이 높음" 같은 low-confidence 예측을 준 경우)
                  없으면 None -> 일반적인 미확인 객체 질문으로 생성
+
+    2026-07-12 실측 확인된 문제(HITL 음성 질문 타이밍이 너무 늦음): 이전에는 여기서
+    매번 OpenAI 채팅 API를 호출해 문장을 새로 생성했음. 이 함수의 결과는 곧바로
+    tts_service.speak()로 또 한 번 OpenAI TTS API를 호출하는 입력이 되므로, 실제로는
+    로봇이 HOLD된 순간부터 사람이 질문을 듣기까지 "LLM 왕복 + TTS 왕복" 두 번의
+    네트워크 호출이 순차로 쌓였다(openai_timeout_sec=8초 기준 최악의 경우 십수 초).
+    "지연시간이 곧 로봇 Hold 시간으로 직결된다"는 openai_timeout_sec 설정 자체의
+    설계 원칙과 정면으로 배치되는 지연이었음. 이 문장은 매번 달라질 필요가 없는
+    정형 안내 문구이므로(실패 시 폴백으로 쓰이던 것과 동일한 수준이면 충분함),
+    LLM 호출 없이 즉시 조립해서 그 왕복 하나를 통째로 없앤다.
     """
-    system_prompt = (
-        "너는 협동로봇의 음성 안내 문구 생성기다. "
-        "작업자에게 새로운 과일을 어디로 보낼지 자연스럽고 짧게 물어보는 "
-        "한국어 질문 문장을 아래 JSON 스키마로만 출력해라: "
-        '{"question": string} '
-        "문장은 1문장, 존댓말, TTS로 읽기 자연스러운 구어체로 작성해라."
-    )
-    user_prompt = (
-        f"학습되지 않은 새로운 과일로 추정되는 객체가 감지됨 (추정: {fruit_guess})."
-        if fruit_guess
-        else "학습되지 않은 새로운 과일 객체가 감지됨 (종류 추정 불가)."
-    )
-    result = await _call_json(system_prompt, user_prompt)
-    question = result.get("question")
-    if not question:
-        raise LLMParseError(f"question 필드가 없음: {result}")
-    return question
+    display_label = fruit_guess or "미확인 물체"
+    return f"{display_label}로 보이는 새로운 물체가 발견됐습니다. 정상, 가공, 못난이, 폐기 중 선택해 주세요."
 
 
 async def explain_decision(audit_row: dict) -> str:
