@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field
 # 파이썬에서 가장 유명한 데이터 검증 라이브러리인 Pydantic에서 BaseModel이라는 핵심 클래스를 가져옴
 # 우리가 만들 데이터 규격 클래스들이 이 BaseModel을 상속받아(기능을 물려받아) 강력한 데이터 검증 기능을 가질 수 있게함
 
-from typing import Optional
-# 파이썬 표준 라이브러리에서 Optional이라는 타입을 가져옴
+from typing import Optional, Literal
+# 파이썬 표준 라이브러리에서 Optional/Literal이라는 타입을 가져옴
 
 class TaskStartRequest(BaseModel):
     # TaskStartRequest라는 이름의 새로운 데이터 규격 클래스를 만듦
@@ -71,6 +71,11 @@ class MoveJointRequest(BaseModel):
     # 6개 필드 모두 필수(...)이며 float(실수) 타입.
     # 두산 협동로봇의 관절 가동범위 제한이 정해지면 Field(..., ge=최소값, le=최대값)으로
     # 범위 검증을 추가하는 게 안전함 (현재는 타입 검증만 수행)
+
+
+class GripperCommandRequest(BaseModel):
+    # "관리자 GUI에서 그리퍼 개방(OPEN)/파지(CLOSE) 버튼을 눌렀을 때 보낼 JSON 데이터 포맷이야"라는 뜻
+    action: Literal["OPEN", "CLOSE"]
 
 # ------------------------------------------------------------------
 # 아래부터 신규 추가: Apple-care VLA 프로젝트용 요청/응답 모델

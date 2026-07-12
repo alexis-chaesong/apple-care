@@ -12,7 +12,10 @@ box_sequence_test.py (유일한 실행 진입점 - pick_helpers.py에서 공용 
       여기로 아예 들어오지 않음 (백엔드 HITL 흐름, 로봇 쪽은 신경 쓸 필요 없음).
     - /robot/command (String/JSON) 구독: {"command": "START"|"EMERGENCY_STOP"|...}
       START가 와야 사이클을 시작하고, EMERGENCY_STOP이 오면 즉시 정지 후
-      estop_handler.py의 복구 절차를 밟음.
+      estop_handler.py의 복구 절차를 밟음. GRIPPER({"payload": {"action":
+      "OPEN"|"CLOSE"}})와 MOVE_JOINT({"payload": {"J1":..,...,"J6":..}})는
+      관리자 GUI 수동 조작 패널용 - manual_command_queue에 적재된 뒤, 자동
+      사이클과 겹치지 않는 안전 지점(사과 사이사이)에서만 실행됨.
     - StatusBus로 /robot/process_state, /robot/motion_status, /gripper/status,
       /robot/safety_event를 발행해서 백엔드/HMI가 현재 상태를 알 수 있게 함.
 
@@ -56,7 +59,7 @@ from rclpy.executors import SingleThreadedExecutor
 import DR_init
 from std_msgs.msg import String
 from apple_care_msgs.srv import SrvAppleStatus, SrvBasketStatus
-from apple_care_robot.openclose import gripper_open
+from apple_care_robot.openclose import gripper_open, gripper_close_with_force, GRIPPER_MAX_FORCE
 from apple_care_robot.pick_helpers import (
     pick_apple, _depth_offset_for_condition, DEFAULT_PICK_ORIENTATION,
 )
@@ -377,11 +380,58 @@ def main(args=None):
             wait_for_resume=wait_for_resume_signal,
         )
 
+    def _handle_manual_command(cmd: dict) -> None:
+        """
+        manual_command_queue에서 꺼낸 수동 명령(그리퍼/MoveJ) 하나를 실행.
+        메인 while 루프의 안전 지점(사과 사이사이)에서만 호출되므로 여기서 하는
+        movej/그리퍼 호출이 pick_apple()/place_apple_in_box() 중의 이동과
+        겹칠 일은 없다.
+        """
+        cmd_type = cmd.get("type")
+
+        if cmd_type == "GRIPPER":
+            action = cmd.get("action")
+            if action == "OPEN":
+                node.get_logger().info("[MANUAL] 그리퍼 OPEN 실행")
+                gripper_open()
+                status_bus.publish_gripper_status(False)
+            elif action == "CLOSE":
+                node.get_logger().info("[MANUAL] 그리퍼 CLOSE 실행")
+                gripper_close_with_force(GRIPPER_MAX_FORCE)
+                status_bus.publish_gripper_status(True)
+            else:
+                node.get_logger().warn(f"[MANUAL] 알 수 없는 그리퍼 action: {action}")
+
+        elif cmd_type == "MOVE_JOINT":
+            joints = cmd.get("joints") or {}
+            try:
+                j_values = [float(joints[f"J{i}"]) for i in range(1, 7)]
+            except (KeyError, TypeError, ValueError):
+                node.get_logger().error(f"[MANUAL] MOVE_JOINT payload가 올바르지 않음: {joints}")
+                return
+            node.get_logger().info(f"[MANUAL] MoveJ 실행: {j_values}")
+            try:
+                do_safe_movej(posj(*j_values))
+            except EmergencyStopError:
+                recover_from_estop_if_needed()
+
+        else:
+            node.get_logger().warn(f"[MANUAL] 알 수 없는 수동 명령: {cmd}")
+
     # ------------------------------------------------------------------
     # 백엔드 연동: /decision/result 구독, /robot/command 구독
     # ------------------------------------------------------------------
     decision_queue: "queue.Queue[dict]" = queue.Queue()
     started = threading.Event()
+
+    # 관리자 GUI(HMI) "JOINT OVERRIDE" / "END EFFECTOR & ACTUATOR CONTROL" 패널에서
+    # 온 수동 명령(그리퍼 개폐, MoveJ). robot_command_callback(comm_node 스레드)은
+    # 여기에 적재만 하고, 실제 실행(_handle_manual_command)은 메인 while 루프의
+    # 안전 지점(사과 사이사이, decision_queue.get() 이전)에서만 이뤄진다 - DSR
+    # movel/movej를 comm_node 스레드에서 직접 부르면 메인 스레드가 진행 중인
+    # 이동/파지와 겹쳐 컨트롤러에 명령이 이중으로 들어갈 위험이 있기 때문
+    # (do_safe_movel/do_safe_movej가 메인 스레드에서만 호출되는 것과 동일한 이유).
+    manual_command_queue: "queue.Queue[dict]" = queue.Queue()
 
     def decision_result_callback(msg: String) -> None:
         try:
@@ -429,6 +479,14 @@ def main(args=None):
             # 게이팅(main.py)이 막혀서, 무시(skip) 처리 후 다른 사과를 이어서
             # 인식해야 하는 흐름이 깨지므로 의도적으로 상태를 건드리지 않는다.
             node.get_logger().info(f"[{TOPIC_ROBOT_COMMAND}] HOLD 수신 (표시용, decision_queue 대기로 이미 반영됨)")
+        elif command == "GRIPPER":
+            action = (data.get("payload") or {}).get("action")
+            node.get_logger().info(f"[{TOPIC_ROBOT_COMMAND}] GRIPPER 수동 명령 수신: {action}")
+            manual_command_queue.put({"type": "GRIPPER", "action": action})
+        elif command == "MOVE_JOINT":
+            joints = data.get("payload") or {}
+            node.get_logger().info(f"[{TOPIC_ROBOT_COMMAND}] MOVE_JOINT 수동 명령 수신: {joints}")
+            manual_command_queue.put({"type": "MOVE_JOINT", "joints": joints})
         else:
             node.get_logger().warn(f"[{TOPIC_ROBOT_COMMAND}] '{command}' 명령은 아직 처리하지 않습니다.")
 
@@ -763,7 +821,21 @@ def main(args=None):
 
     status_bus.set_state("READY")
     node.get_logger().info("=== Box sequence test: /robot/command의 START 대기 중 ===")
-    started.wait()
+    # started.wait()를 인자 없이(무한 블로킹) 쓰면, START를 누르기 전에 관리자가
+    # 먼저 점검/조작하려는 그리퍼 OPEN/CLOSE나 MoveJ 명령이 manual_command_queue에
+    # 쌓이기만 하고 전혀 소비되지 않는다 (실측 확인됨: START 전에 버튼을 눌러도
+    # ROS 로그에는 "수동 명령 수신"까지만 찍히고 실제로는 움직이지 않았음 - 아래
+    # while 루프 안의 동일한 처리가 여기서는 아직 한 번도 실행되지 않기 때문).
+    # 짧은 timeout으로 폴링하며 그 사이사이 큐를 비워, START 전에도 while 루프와
+    # 동일한 안전 지점 처리로 수동 조작이 즉시 반영되게 한다.
+    while not started.is_set():
+        while not manual_command_queue.empty():
+            try:
+                manual_cmd = manual_command_queue.get_nowait()
+            except queue.Empty:
+                break
+            _handle_manual_command(manual_cmd)
+        started.wait(timeout=0.2)
 
     node.get_logger().info("=== Box sequence test start ===")
     status_bus.set_state("MOVING")
@@ -818,6 +890,19 @@ def main(args=None):
         # 없어서 아래 try/except(이동 도중 감지용)로는 못 잡으므로 별도로 확인.
         if recover_from_estop_if_needed():
             continue
+
+        # 관리자 GUI 수동 조작(그리퍼 개폐 / MoveJ) - PAUSED 여부와 무관하게
+        # 여기(자동 사이클이 진행 중이 아닌 안전 지점)에서 처리한다. 밀린 명령이
+        # 여러 개 쌓였으면 들어온 순서대로 모두 실행.
+        if emergency_stop.is_set():
+            manual_command_queue.queue.clear()
+        else:
+            while not manual_command_queue.empty():
+                try:
+                    manual_cmd = manual_command_queue.get_nowait()
+                except queue.Empty:
+                    break
+                _handle_manual_command(manual_cmd)
 
         # 프론트엔드 "PAUSE ROBOT MOTION" 버튼(MANUAL_PAUSE) - 이미 진행 중인
         # 집기/이동 사이클(아래 decision 처리 블록)은 안전하게 끝까지 마치고,

@@ -121,15 +121,14 @@ def post_robot_resume() -> dict:
 
 
 # ------------------------------------------------------------------
-# 그리퍼 / MoveJ 제어용 함수 (TODO: backend 엔드포인트 미구현)
+# 그리퍼 / MoveJ 제어용 함수
 # ------------------------------------------------------------------
-# routers/robot_router.py에는 아직 그리퍼(open/close), MoveJ(관절각 일괄 전송)에
-# 대응하는 엔드포인트가 없음. 아래 두 함수는 backend 담당자가 엔드포인트를 추가할
-# 것을 전제로 미리 만들어둔 것이며, 엔드포인트가 없는 동안은 항상 404로 실패한다.
-# 호출부(dashboard.py)는 이 실패를 그대로 사용자에게 보여주고, 절대 로컬에서
-# 임의로 "성공" 처리하지 않는다.
-#
-# 엔드포인트가 추가되면 필요 시 URL/바디만 맞춰 조정하면 됨:
+# routers/robot_router.py의 POST /api/robot/gripper, POST /api/robot/move_joint에
+# 대응. robot_bridge.publish_command()가 command_type="GRIPPER"/"MOVE_JOINT"로
+# /robot/command에 발행하면, ROS 쪽 box_sequence_test.py의 robot_command_callback이
+# manual_command_queue에 적재했다가 자동 사이클과 겹치지 않는 안전한 지점(사과
+# 사이사이)에서만 실제로 실행한다 - 즉 이 REST 호출의 200 응답은 "명령이 큐에
+# 들어갔다"는 뜻이지 "로봇이 즉시 움직였다"는 보장은 아니다.
 #   POST /api/robot/gripper       {"action": "OPEN" | "CLOSE"}
 #   POST /api/robot/move_joint    {"J1": .., "J2": .., ..., "J6": ..}  (models.MoveJointRequest)
 def post_gripper_command(action: str) -> dict:

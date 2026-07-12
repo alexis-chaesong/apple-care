@@ -12,7 +12,7 @@ SORT_DECISION과 동일한 패턴). 실제 ROS 노드가 이 커맨드들을 받
 
 from fastapi import APIRouter
 
-from models import EmergencyStopRequest
+from models import EmergencyStopRequest, GripperCommandRequest, MoveJointRequest
 from robot_bridge import bridge_manager
 
 router = APIRouter(prefix="/api/robot")
@@ -47,3 +47,20 @@ async def resume_robot():
     # 재개 버튼을 눌러야만 다음 사이클(비전 재탐지)이 진행되도록 하기 위함.
     bridge_manager.publish_command(command_type="RESUME")
     return {"result": "SUCCESS", "command": "RESUME"}
+
+
+@router.post("/gripper", summary="그리퍼 수동 개폐 (JOG/OVERRIDE 패널)")
+async def control_gripper(payload: GripperCommandRequest):
+    # ROS 쪽(box_sequence_test.py의 robot_command_callback)이 command_type="GRIPPER"를
+    # manual_command_queue로 받아, 자동 사이클 도중 이동/파지와 겹치지 않는 안전한
+    # 지점(사과 사이사이)에서만 실제 그리퍼 Modbus 명령을 실행한다.
+    bridge_manager.publish_command(command_type="GRIPPER", payload={"action": payload.action})
+    return {"result": "SUCCESS", "command": "GRIPPER", "action": payload.action}
+
+
+@router.post("/move_joint", summary="관절각 일괄 이동(MoveJ) 수동 제어")
+async def move_joint(payload: MoveJointRequest):
+    # /gripper와 동일하게 ROS의 manual_command_queue를 거쳐, 자동 사이클과 겹치지
+    # 않는 안전한 지점에서만 실제 movej가 실행된다.
+    bridge_manager.publish_command(command_type="MOVE_JOINT", payload=payload.model_dump())
+    return {"result": "SUCCESS", "command": "MOVE_JOINT", "joint_angles": payload.model_dump()}
