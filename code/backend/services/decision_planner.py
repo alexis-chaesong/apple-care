@@ -23,8 +23,8 @@ services.vlm_gate(OpenAI GPT-4o Vision 호출)를 알아야 해서 "OpenAI도 �
         # 이후로는 아래와 완전히 동일한 Stage3 게이트를 effective_fruit_type으로 통과
     if vision.confidence < confidence_threshold:
         ask_human()  # Vision 자체가 확신 못 함 (기획서 12번 예외1, Stage1 실패)
-        # 주의: unknown은 이 Stage1보다 먼저 분기되어 여기로 안 옴 (아래 "Stage1
-        # 우회" 설명 참고)
+        # 주의: unknown/small은 이 Stage1보다 먼저 분기(또는 조건에서 제외)되어
+        # 여기로 안 옴 (아래 "Stage1 우회" 설명 참고)
     else:
         condition, policy = 정책 조회
         query_human, evpi, cost = should_query_human(...)  # §4.3.5
@@ -59,6 +59,18 @@ query_human=True를 반환하므로, "unknown은 안전 계열이라 무조건 �
 동작만으로 충족된다 - SAFETY_CONDITIONS에 "unknown"이 포함돼 있어(§4.3.1)
 L_error가 항상 1000이 되는 것과 결합되어, 정책이 쌓여도 웬만큼 압도적으로
 일관된 사람 답변이 누적되기 전까지는 계속 질문 쪽으로 기운다.
+
+"small도 Stage1을 우회한다" (2026-07-13 추가): apple_small의 실측 로그를 보면
+depth 기반 지름 측정(size_classifier.py)은 프레임마다 45.5~45.8mm로 매우
+안정적인데, YOLO box confidence는 60~70%대에 자주 걸린다 - 작은 물체일수록
+화면 내 정보량이 적어 YOLO가 confidence를 낮게 주는 경향 때문이다. "작다"는
+판정 자체는 depth 실측이 근거이지 YOLO confidence가 근거가 아니므로, unknown과
+동일한 논리로 candidates[0]=="small"일 때는 Stage1(vision.confidence) 게이트를
+건너뛰고 곧장 정책 조회 -> Stage3 게이트로 넘어간다. unknown과 달리 별도
+분기(_decide_unknown_object)를 타지 않고, 아래 일반 경로(2)+3))를 그대로
+통과시킨다 - VLM 식별 같은 추가 단계가 필요 없기 때문. defect_type이
+CONDITION_PRIORITY(mold/bruise/scratch)에 걸려 candidates[0]이 "small"이 아니게
+되면(Priority Rule) 이 우회는 적용되지 않고 평소대로 Stage1을 거친다.
 
 Priority Rule (기획서 12번 예외5, "Discard > Damaged > Processing > Normal"):
     사과 하나에 결함이 여러 개 동시에 적용될 수 있는 경우
@@ -319,10 +331,14 @@ async def decide(vision: VisionFeatureIn, n_t: int = 0, tau_hold_t: float = 0.0)
     if candidates[0] == "unknown":
         return await _decide_unknown_object(vision, n_t, tau_hold_t)
 
-    # 1) Vision 자체가 확신 못 하는 경우 - 정책/메모리와 무관하게 무조건 확인
-    #    (기획서 12번 예외1: "AI가 확신하지 못하는 경우에는 강제로 분류하지 않는다",
-    #     Stage1 실패 - EVPI/Cost 계산 없이 무조건 질문)
-    if vision.confidence < settings.confidence_threshold:
+    # small도 unknown과 같은 이유로 Stage1을 우회한다: "작다"는 판단 근거는
+    # YOLO box confidence가 아니라 size_classifier.py의 depth 실측 지름이라,
+    # YOLO confidence가 낮게 나오는 것(작은 물체일수록 화면 내 정보량이 적어
+    # 흔한 현상, obj_detection 실측 로그로 확인됨)이 size 판정 자체의 신뢰도와
+    # 무관하다. 이 게이트를 그대로 적용하면 apple_small 정책(tb_policy_memory에
+    # confidence=1.0으로 이미 확정돼 있어도)이 Stage2/3까지 가보지도 못하고
+    # 매번 ask_human으로 끝나버린다.
+    if vision.confidence < settings.confidence_threshold and candidates[0] != "small":
         logger.info(
             "낮은 confidence(%.2f < %.2f)로 인해 ask_human 처리: fruit=%s",
             vision.confidence, settings.confidence_threshold, vision.fruit_type,
