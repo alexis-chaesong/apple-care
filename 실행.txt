@@ -1,4 +1,8 @@
-# 백엔드, 프론드 단축어 - 앞에 경로 본인 상황에 맞게 수정할 것
+#-------------------------------------------------------------------------------------
+# 전제:그리퍼가 달린 두산로봇팔 패키지, 리얼센스 설치된상태 (카메라 관련은 협동2프로젝트 설치 환경과 동일)
+#-------------------------------------------------------------------------------------
+
+# 백엔드, 프론드 단축어 - 앞에 경로 본인 상황에 맞게 수정
 # 이건 .bashrc 맨 아래에 추가하면 됨
 alias bck='cd ~/apple-care/code/backend && uvicorn main:app --reload'
 alias fr='cd ~/apple-care/code/hmi_app && python3 view/dashboard.py'
@@ -6,7 +10,10 @@ alias obd='ros2 run obj_detection object_detection'
 alias pos_c='ros2 run obj_detection object_detection'
 alias acr='ros2 run apple_care_robot box_sequence_test'
 
-# 넣기 전에 폴더 경로 확인하세요 꼭!!!!! - 본인 상황에 맞게 수정할 것
+# 여기서 오디오 인덱스는 꼭 확인하시고 본인 하드웨어에 맞게 수정
+alias sec_c='ros2 run obj_detection basket_camera --ros-args -p device_index:=39'
+
+# 넣기 전에 폴더 경로 확인하세요 꼭!!!!! - 본인 상황에 맞게 수정
 # for p2
 function p2(){
   cd ~/apple-care/code
@@ -15,31 +22,38 @@ function p2(){
   [ -f ~/apple-care/code/robot_ws/install/setup.bash ] && source ~/apple-care/code/robot_ws/install/setup.bash
 }
 
-다음 순으로 하면 됨
+다음 순으로 하면 됩니다
 
-# 확인할 것:
-# 로봇팔 소스 작업 선행!!!! (매우 중요)
-
-# 로봇 실행
-로봇패키지 소스
-roboton 아니면 bring_rg
-
-# realsense
-realsense
-
-# 카메라 위치로 이동
-pos_c
-
-# vision_ws - 앞에 경로 본인 상황에 맞게 수정할 것
+# vision_ws - 앞에 경로 본인 상황에 맞게 수정
 cd ~/apple-care/code/vision_ws && colcon build --symlink-install
 source install/setup.bash
 
-# robot_ws - 앞에 경로 본인 상황에 맞게 수정할 것
+# robot_ws - 앞에 경로 본인 상황에 맞게 수정
 cd ~/apple-care/code/robot_ws && colcon build --symlink-install
 source install/setup.bash
+
+# 확인할 것:
+# 모든 터미널에서 로봇팔 소스 작업 선행!!!! (매우 중요)
+
+# 로봇 실행 - 터미널1
+로봇패키지 소스
+roboton (그리퍼가 있는 두산로봇팔 패키지로 launch 하여야합니다. 안 그럼 onrobot서버와 통신하는 것이 안됩니다.)
+
+# realsense - 터미널2
+realsense
+
+# 카메라 위치로 이동 (디버깅창으로 카메라 위치 확인) 터미널 3
+pos_c
+# 터미널3에서 카메라 위치 이동 후 세컨드 카메라 사용
+sec_c
 
 # 하고 나서 p2 하면 둘다 소스 처리됨
 
 # 이후
-obd 먼저 하고
-acr
+# obd - 객체인식
+# acr - 로봇제어
+obd 먼저 하고 - 터미널4
+acr - 터미널5
+
+bck - 터미널6
+fr - 터미널7
