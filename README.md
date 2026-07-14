@@ -29,52 +29,15 @@ AI(Computer Vision) 기반 협동 로봇 작업 어시스턴트 — 애매한 �
 
 ### 전체 시스템 플로우
 
-```
-START
-  └─ 1. 시스템 초기화 (카메라 · 로봇 · DB · 모델 로드)
-  └─ 2. 사용자 정책 입력 (음성/STT · Tkinter) → LLM이 정책 JSON 생성 ──┐
-  └─ 3. 사과 공급 및 촬영 (D455 상단 + C720 측면)                     │
-  └─ 4. Vision 분석 (객체 탐지·위치 추출, 결함/Confidence 계산)        │ 정책
-  └─ 5. Unknown Object?                                              │ 재입력
-       ├─ Yes → 5-1. Unknown 처리(TTS 질문) → 5-2. 사용자 응답(STT)   │ 루프
-       │        → 5-3. 응답 해석·Policy Update → 5-4. Memory 저장     │
-       │        (Bayesian Update) ──────────────────────────────────┘
-       └─ No ↓
-  └─ 6. Confidence < 임계값?
-       ├─ Yes → 6-1. 의심 상황 알림(TTS) → 6-2. 사용자 확인(STT)
-       │        → 6-3. 최종 분류 결정 ──→ (Memory 활용: 다음 판단의 Prior로)
-       └─ No ↓
-  └─ 7. 분류 결정 (Normal / Processing / Discard)
-  └─ 8. Motion Planning (목적지 할당·그룹화 · 최적 경로 · 작업 순서 생성)
-  └─ 9. Pick & Place 실행 (M0609 로봇 동작)
-  └─ 10. 모든 작업 완료? ─ No → 4번으로 반복 / Yes → END
-```
+![AppleCare 전체 시스템 플로우차트](docs/flowchart.png)
+
+> 정책 입력부터 Vision 분석 → Unknown/Confidence 분기(HITL) → 분류 결정 → Motion Planning → Pick & Place까지의 전체 루프. 원본: [docs/flowchart.png](docs/flowchart.png)
 
 ### 레이어 아키텍처
 
-```
-① 센서/카메라 Layer                    ② HMI Layer (Tkinter)
-   RealSense D455 (상단, RGB+Depth)   →   정책 입력/수정, 상태 모니터링,
-   Logitech C720/C270 (측면/바스켓)        STT(음성 입력) / TTS(음성 출력)
-        │                                        │
-        ▼                                        ▼
-③ Backend Layer (FastAPI)          ↔   ④ LLM & Policy Layer
-   API 서버 · 세션/작업 관리                자연어 정책 해석 · 질문 생성
-   정책/메모리 DB 관리 · 로봇 명령            (Unknown/의심) · 응답 해석
-   전달 · STT/TTS 제어                       → Policy DB(SQLite, Prior/Posterior)
-        │
-        ▼
-⑤ Vision Module        →   ⑥ Decision Module        ↔   ⑦ Bayesian Policy Update
-   YOLO 탐지 · 결함분석        Vision Feature + Policy       Human Feedback 반영
-   Depth 3D 좌표 · Confidence  결합 → 분류 결정               Prior → Posterior 갱신
-   · Unknown 검출              (Normal/Processing/            → Memory DB 저장
-                                Discard/Ask Human/Unknown)
-        │
-        ▼
-⑧ Motion Planning Module   →   ⑨ Robot Control Module (ROS2)   →   ⑩ Target Boxes
-   목적지 할당·그룹화               M0609 제어 · Pick & Place            정상/가공/폐기/기타
-   최적 경로(TSP 유사) · Queue      그리퍼 제어 · 안전 경로/경유점
-```
+![AppleCare 시스템 아키텍처 — 레이어 구조](docs/system_architecture.png)
+
+> 센서/카메라 → HMI/LLM·Policy → Backend → Vision/Decision/Bayesian Policy Update → Motion Planning/Robot Control → Target Boxes로 이어지는 10개 레이어 구조. 원본: [docs/system_architecture.png](docs/system_architecture.png)
 
 ### 박스 매핑
 
