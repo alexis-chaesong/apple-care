@@ -6,6 +6,8 @@ AI(Computer Vision) 기반 협동 로봇 작업 어시스턴트 — 애매한 �
 
 > Apple VLA Project | TEAM B-4 (구나영 · 박선욱 · 박채송 · 이현민) | MENTOR 이충현 · 두산로보틱스
 
+> 발표자료 및 시연영상 링크: https://drive.google.com/drive/folders/1HgJJUFLrXR3NEuuhsMuC4EJS37tfkn0L?usp=drive_link
+
 ---
 
 ## 주요 기능
